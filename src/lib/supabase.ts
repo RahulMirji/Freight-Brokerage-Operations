@@ -1,7 +1,31 @@
-import { createBrowserClient } from "@supabase/ssr";
+import { createBrowserClient, createServerClient as createSupabaseServerClient, type CookieOptions } from "@supabase/ssr";
+import type { ReadonlyRequestCookies } from "next/dist/server/web/spec-extension/adapters/request-cookies";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+/**
+ * Server-side Supabase client. Use this in middleware, Server Components,
+ * and Route Handlers. Pass a cookies() adapter from next/headers.
+ */
+export function createServerSupabaseClient(cookieStore: ReadonlyRequestCookies) {
+  return createSupabaseServerClient(supabaseUrl, supabaseAnonKey, {
+    cookies: {
+      getAll() {
+        return cookieStore.getAll();
+      },
+      setAll(cookiesToSet: { name: string; value: string; options: CookieOptions }[]) {
+        try {
+          cookiesToSet.forEach(({ name, value, options }) =>
+            (cookieStore as any).set(name, value, options)
+          );
+        } catch {
+          // setAll called from Server Component — reads are fine, writes silently ignored
+        }
+      },
+    },
+  });
+}
 
 /**
  * Browser-side Supabase client. Use this in all "use client" components.

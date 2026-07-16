@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase";
 import { 
   Building2, 
   Truck, 
@@ -66,17 +67,31 @@ export default function DashboardShell({ children, activeRole }: DashboardShellP
   const [user, setUser] = useState<{ name: string; email: string } | null>(null);
 
   useEffect(() => {
-    const loadUser = () => {
-      const stored = localStorage.getItem("loadflow_user");
-      if (stored) {
-        setUser(JSON.parse(stored));
-      } else {
-        setUser({ name: "Rahul Mirji", email: "demo@loadflow.com" });
+    const supabase = createClient();
+    
+    const loadUser = async () => {
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      if (authUser) {
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("full_name, company_name, email")
+          .eq("id", authUser.id)
+          .single();
+        
+        setUser({
+          name: profile?.full_name || profile?.company_name || authUser.email || "User",
+          email: profile?.email || authUser.email || "",
+        });
       }
     };
+
     loadUser();
-    window.addEventListener("loadflow_state_change", loadUser);
-    return () => window.removeEventListener("loadflow_state_change", loadUser);
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(() => {
+      loadUser();
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   const getMenuItems = () => {
@@ -158,12 +173,19 @@ export default function DashboardShell({ children, activeRole }: DashboardShellP
               <p className="text-xs text-slate-500 truncate">{user?.email || "demo@loadflow.com"}</p>
             </div>
           </div>
-          <Link href="/login">
-            <Button variant="ghost" size="sm" className="w-full text-slate-400 hover:text-red-400 hover:bg-red-500/10 justify-start gap-2.5 rounded-lg">
-              <LogOut size={16} />
-              Exit Portal
-            </Button>
-          </Link>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={async () => {
+              const supabase = createClient();
+              await supabase.auth.signOut();
+              router.push("/login");
+            }}
+            className="w-full text-slate-400 hover:text-red-400 hover:bg-red-500/10 justify-start gap-2.5 rounded-lg cursor-pointer"
+          >
+            <LogOut size={16} />
+            Sign Out
+          </Button>
         </div>
       </aside>
 
