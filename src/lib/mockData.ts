@@ -31,6 +31,9 @@ export interface Load {
   bids: Bid[];
   carrierSignature?: string;
   signedAt?: string;
+  carrierId?: string | null;
+  complianceOverridden?: boolean;
+  podUrl?: string | null;
 }
 
 export interface CarrierCompliance {

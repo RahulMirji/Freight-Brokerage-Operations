@@ -174,7 +174,10 @@ export function mapDbLoadToUiLoad(dbLoad: any): any {
     createdAt: dbLoad.created_at?.split("T")[0] || "",
     bids: bids,
     carrierSignature: dbLoad.carrier_signature || undefined,
-    signedAt: dbLoad.signed_at || undefined
+    signedAt: dbLoad.signed_at || undefined,
+    carrierId: dbLoad.carrier_id || null,
+    complianceOverridden: dbLoad.compliance_overridden || false,
+    podUrl: dbLoad.pod_url || null
   };
 }
 

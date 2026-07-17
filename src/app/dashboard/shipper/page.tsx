@@ -319,7 +319,13 @@ export default function ShipperOverview() {
                       ["delivered", "completed"].includes(activeSelectedLoad.status) ? "bg-emerald-400" : "bg-slate-700"
                     }`} />
                     <p className="font-bold text-slate-200">Delivered at Destination</p>
-                    <p className="text-[10px] text-slate-500 mt-0.5">Proof of Delivery (POD) pending audit checks.</p>
+                    {activeSelectedLoad.podUrl ? (
+                      <p className="text-[10px] text-emerald-400 font-semibold mt-0.5">
+                        Proof of Delivery (POD) uploaded: <span className="underline font-bold text-slate-200">{activeSelectedLoad.podUrl}</span>
+                      </p>
+                    ) : (
+                      <p className="text-[10px] text-slate-500 mt-0.5">Proof of Delivery (POD) pending audit checks.</p>
+                    )}
                   </div>
 
                 </div>

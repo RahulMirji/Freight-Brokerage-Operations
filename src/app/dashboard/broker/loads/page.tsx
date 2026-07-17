@@ -18,7 +18,8 @@ import {
   X,
   PlusCircle,
   FileCheck2,
-  Trash
+  Trash,
+  AlertTriangle
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -42,6 +43,17 @@ export default function BrokerLoads() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [selectedLoad, setSelectedLoad] = useState<Load | null>(null);
+
+  // New state variables
+  const [userProfile, setUserProfile] = useState<any>(null);
+  const [assignedCarrierCompliance, setAssignedCarrierCompliance] = useState<any>(null);
+  const [rateConfirmations, setRateConfirmations] = useState<any[]>([]);
+
+  // Accessorial Form state
+  const [tarpCharge, setTarpCharge] = useState("0");
+  const [detentionCharge, setDetentionCharge] = useState("0");
+  const [layoverCharge, setLayoverCharge] = useState("0");
+  const [isIssuingVersion, setIsIssuingVersion] = useState(false);
 
   // Form states for new load
   const [shipperName, setShipperName] = useState("");
@@ -97,6 +109,111 @@ export default function BrokerLoads() {
       supabase.removeChannel(channel);
     };
   }, []);
+
+  useEffect(() => {
+    const fetchProfile = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", user.id)
+        .single();
+      setUserProfile(data);
+    };
+    fetchProfile();
+  }, []);
+
+  useEffect(() => {
+    const fetchCarrierCompliance = async () => {
+      if (!selectedLoad?.carrierId) {
+        setAssignedCarrierCompliance(null);
+        return;
+      }
+      const { data } = await supabase
+        .from("carrier_compliance")
+        .select("*")
+        .eq("carrier_id", selectedLoad.carrierId)
+        .maybeSingle();
+      setAssignedCarrierCompliance(data);
+    };
+
+    const fetchRateConfirmations = async () => {
+      if (!selectedLoad || !(selectedLoad as any).db_id) {
+        setRateConfirmations([]);
+        return;
+      }
+      const { data } = await supabase
+        .from("rate_confirmations")
+        .select("*")
+        .eq("load_id", (selectedLoad as any).db_id)
+        .order("version", { ascending: false });
+      if (data) setRateConfirmations(data);
+    };
+
+    fetchCarrierCompliance();
+    fetchRateConfirmations();
+  }, [selectedLoad]);
+
+  const handleToggleComplianceOverride = async () => {
+    if (!selectedLoad || !(selectedLoad as any).db_id) return;
+    const nextOverride = !selectedLoad.complianceOverridden;
+    const { error } = await supabase
+      .from("loads")
+      .update({ compliance_overridden: nextOverride })
+      .eq("id", (selectedLoad as any).db_id);
+    if (error) {
+      alert("Failed to override compliance block: " + error.message);
+    } else {
+      setSelectedLoad({
+        ...selectedLoad,
+        complianceOverridden: nextOverride
+      });
+    }
+  };
+
+  const handleIssueRateConfirmation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedLoad || !(selectedLoad as any).db_id || !selectedLoad.carrierId) return;
+
+    const tarp = Number(tarpCharge) || 0;
+    const det = Number(detentionCharge) || 0;
+    const lay = Number(layoverCharge) || 0;
+    const accessorialsTotal = tarp + det + lay;
+    const grandTotal = selectedLoad.rate + accessorialsTotal;
+
+    const nextVersion = rateConfirmations.length > 0 ? (rateConfirmations[0].version + 1) : 1;
+
+    const { error } = await supabase
+      .from("rate_confirmations")
+      .insert({
+        load_id: (selectedLoad as any).db_id,
+        carrier_id: selectedLoad.carrierId,
+        version: nextVersion,
+        rate: selectedLoad.rate,
+        tarp_charge: tarp,
+        detention_charge: det,
+        layover_charge: lay,
+        accessorials_total: accessorialsTotal,
+        grand_total: grandTotal,
+        status: "pending_signature"
+      });
+
+    if (error) {
+      alert("Error issuing rate confirmation: " + error.message);
+    } else {
+      setTarpCharge("0");
+      setDetentionCharge("0");
+      setLayoverCharge("0");
+      setIsIssuingVersion(false);
+      const { data } = await supabase
+        .from("rate_confirmations")
+        .select("*")
+        .eq("load_id", (selectedLoad as any).db_id)
+        .order("version", { ascending: false });
+      if (data) setRateConfirmations(data);
+    }
+  };
 
   const handleCreateLoad = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -578,6 +695,49 @@ export default function BrokerLoads() {
                   )}
                 </div>
 
+                {/* Compliance Standing & Override */}
+                {activeSelectedLoad.carrierId && assignedCarrierCompliance && (
+                  <div className="space-y-3.5 border-t border-slate-800/40 pt-4">
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Carrier Compliance</h4>
+                    {assignedCarrierCompliance.insurance_status !== "compliant" || assignedCarrierCompliance.safety_rating === "Unsatisfactory" ? (
+                      <div className="p-3 bg-red-950/15 border border-red-500/10 rounded-xl space-y-2">
+                        <p className="text-xs text-red-400 font-semibold flex items-center gap-1.5">
+                          <AlertTriangle className="h-4 w-4 shrink-0" />
+                          Compliance Lapsed: Progress past Assigned is blocked!
+                        </p>
+                        <p className="text-[10px] text-slate-450">
+                          Insurance: <span className="capitalize font-bold text-red-300">{assignedCarrierCompliance.insurance_status}</span> • Safety Rating: <span className="font-bold text-red-300">{assignedCarrierCompliance.safety_rating}</span>
+                        </p>
+                        
+                        {(userProfile?.permissions?.includes("load.override_compliance_flag") || userProfile?.is_org_admin) && (
+                          <div className="flex items-center gap-2 pt-1 border-t border-red-500/10 mt-1">
+                            <input 
+                              id="compliance-override-checkbox"
+                              type="checkbox"
+                              checked={activeSelectedLoad.complianceOverridden}
+                              onChange={handleToggleComplianceOverride}
+                              className="rounded border-slate-850 bg-slate-950 text-red-500 focus:ring-red-500/20 cursor-pointer"
+                            />
+                            <Label htmlFor="compliance-override-checkbox" className="text-[10px] text-slate-350 font-semibold cursor-pointer select-none">
+                              Apply Compliance Override Flag
+                            </Label>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="p-3 bg-emerald-950/15 border border-emerald-500/10 rounded-xl">
+                        <p className="text-xs text-emerald-400 font-semibold flex items-center gap-1.5">
+                          <Check className="h-4 w-4 shrink-0" />
+                          Carrier Compliance Verified
+                        </p>
+                        <p className="text-[10px] text-slate-400 mt-0.5">
+                          Insurance status is compliant. Safety rating is satisfactory.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Financial Summary */}
                 <div className="space-y-3.5 border-t border-slate-800/40 pt-4">
                   <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Financial Breakdown</h4>
@@ -590,6 +750,115 @@ export default function BrokerLoads() {
                     <div className="text-emerald-400 font-bold text-right">${activeSelectedLoad.margin.toLocaleString()}</div>
                   </div>
                 </div>
+
+                {/* Proof of Delivery (POD) Viewer */}
+                {activeSelectedLoad.podUrl && (
+                  <div className="space-y-3.5 border-t border-slate-800/40 pt-4">
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Proof of Delivery (POD)</h4>
+                    <div className="p-3 bg-slate-950/30 border border-slate-900 rounded-xl flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <FileCheck2 className="text-emerald-400 h-5 w-5" />
+                        <div>
+                          <p className="text-xs font-semibold text-slate-200">{activeSelectedLoad.podUrl}</p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">Uploaded by carrier driver</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Rate Confirmations Versioning & Accessorials */}
+                {activeSelectedLoad.status !== "posted" && activeSelectedLoad.carrierId && (
+                  <div className="space-y-3.5 border-t border-slate-800/40 pt-4">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Digital Contract Versions</h4>
+                      {(userProfile?.permissions?.includes("rate.confirm") || userProfile?.is_org_admin) && (
+                        <Button 
+                          size="xs"
+                          variant="outline"
+                          onClick={() => setIsIssuingVersion(!isIssuingVersion)}
+                          className="text-[10px] font-semibold h-7 border-slate-800 bg-slate-950 hover:bg-slate-900 cursor-pointer px-2"
+                        >
+                          {isIssuingVersion ? "Cancel" : "Add Accessorials / New Version"}
+                        </Button>
+                      )}
+                    </div>
+
+                    {isIssuingVersion && (
+                      <form onSubmit={handleIssueRateConfirmation} className="p-3.5 bg-slate-950/40 border border-slate-800 rounded-xl space-y-3">
+                        <h5 className="text-[10px] font-bold text-white uppercase tracking-wider">Add Accessorial Charges</h5>
+                        <div className="grid grid-cols-3 gap-2">
+                          <div className="space-y-1">
+                            <Label className="text-[10px] text-slate-400">Tarp ($)</Label>
+                            <Input 
+                              type="number" 
+                              value={tarpCharge} 
+                              onChange={(e) => setTarpCharge(e.target.value)}
+                              className="bg-slate-900 border-slate-850 text-xs h-7 px-1.5 focus:ring-emerald-500/20 text-slate-200"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-[10px] text-slate-400">Detention ($)</Label>
+                            <Input 
+                              type="number" 
+                              value={detentionCharge} 
+                              onChange={(e) => setDetentionCharge(e.target.value)}
+                              className="bg-slate-900 border-slate-850 text-xs h-7 px-1.5 focus:ring-emerald-500/20 text-slate-200"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-[10px] text-slate-400">Layover ($)</Label>
+                            <Input 
+                              type="number" 
+                              value={layoverCharge} 
+                              onChange={(e) => setLayoverCharge(e.target.value)}
+                              className="bg-slate-900 border-slate-850 text-xs h-7 px-1.5 focus:ring-emerald-500/20 text-slate-200"
+                            />
+                          </div>
+                        </div>
+                        <Button 
+                          type="submit" 
+                          size="sm"
+                          className="w-full bg-emerald-500 hover:bg-emerald-600 text-black font-semibold text-xs rounded-lg py-1.5 cursor-pointer shadow-lg shadow-emerald-500/10"
+                        >
+                          Publish Rate Version {rateConfirmations.length + 1}
+                        </Button>
+                      </form>
+                    )}
+
+                    <div className="space-y-2">
+                      {rateConfirmations.map((conf) => (
+                        <div key={conf.id} className="p-3 bg-slate-950/30 border border-slate-900 rounded-xl space-y-1.5 text-[11px]">
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-white">Version {conf.version}</span>
+                            <Badge className={`text-[9px] uppercase ${
+                              conf.status === "signed" ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                            }`}>
+                              {conf.status === "signed" ? "Signed" : "Pending Signature"}
+                            </Badge>
+                          </div>
+                          <div className="grid grid-cols-2 gap-y-1 text-slate-450">
+                            <span>Base Rate:</span>
+                            <span className="text-right font-medium text-slate-200">${conf.rate.toLocaleString()}</span>
+                            {conf.accessorials_total > 0 && (
+                              <>
+                                <span>Accessorials:</span>
+                                <span className="text-right font-medium text-amber-400">+${conf.accessorials_total.toLocaleString()}</span>
+                              </>
+                            )}
+                            <span className="font-bold text-slate-350">Grand Total:</span>
+                            <span className="text-right font-bold text-white">${conf.grand_total.toLocaleString()}</span>
+                          </div>
+                          {conf.status === "signed" && (
+                            <p className="text-[9px] text-slate-500 pt-1.5 border-t border-slate-900/60 mt-1 leading-normal">
+                              Signed by: {conf.carrier_signature} at {new Date(conf.signed_at).toLocaleString()}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* Bidding Manager */}
                 <div className="space-y-3.5 border-t border-slate-800/40 pt-4">

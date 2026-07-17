@@ -1,12 +1,13 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
 import { Activity, Building2, Truck, ShieldCheck, Eye, EyeOff, AlertCircle, CheckCircle2 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase";
 import type { UserRole } from "@/lib/supabase";
 
@@ -33,7 +34,11 @@ const ROLE_CONFIG: Record<UserRole, { label: string; icon: React.ReactNode; colo
   },
 };
 
-export default function SignupPage() {
+function SignupPageContent() {
+  const searchParams = useSearchParams();
+  const inviteOrgId = searchParams.get("org_id");
+  const inviteRoleId = searchParams.get("role_id");
+
   const [step, setStep] = useState<Step>("details");
   const [role, setRole] = useState<UserRole>("shipper");
   const [fullName, setFullName] = useState("");
@@ -43,6 +48,23 @@ export default function SignupPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchInviteDetails = async () => {
+      if (!inviteOrgId) return;
+      const supabase = createClient();
+      const { data: org } = await supabase
+        .from("organizations")
+        .select("name, type")
+        .eq("id", inviteOrgId)
+        .maybeSingle();
+      if (org) {
+        setCompanyName(org.name);
+        setRole(org.type as any);
+      }
+    };
+    fetchInviteDetails();
+  }, [inviteOrgId]);
 
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -66,6 +88,8 @@ export default function SignupPage() {
           full_name: fullName,
           company_name: companyName,
           role: role,
+          org_id: inviteOrgId || null,
+          role_id: inviteRoleId || null,
         },
         // Supabase will send the verification link to this URL
         emailRedirectTo: `${window.location.origin}/auth/callback`,
@@ -163,36 +187,42 @@ export default function SignupPage() {
             <form onSubmit={handleSignup} className="space-y-4">
 
               {/* Role Selection */}
-              <div className="space-y-2">
-                <Label>I am a&hellip;</Label>
-                <div className="grid grid-cols-3 gap-2">
-                  {(Object.keys(ROLE_CONFIG) as UserRole[]).map((r) => {
-                    const cfg = ROLE_CONFIG[r];
-                    const isSelected = role === r;
-                    const colorMap = {
-                      emerald: isSelected ? "border-emerald-500 bg-emerald-500/5 text-emerald-400" : "",
-                      cyan: isSelected ? "border-cyan-500 bg-cyan-500/5 text-cyan-400" : "",
-                      amber: isSelected ? "border-amber-500 bg-amber-500/5 text-amber-400" : "",
-                    };
-                    return (
-                      <button
-                        key={r}
-                        type="button"
-                        onClick={() => setRole(r)}
-                        className={`flex flex-col items-center justify-center p-3 rounded-xl border text-center transition-all cursor-pointer ${
-                          isSelected
-                            ? colorMap[cfg.color as keyof typeof colorMap]
-                            : "border-slate-800 bg-slate-950/30 text-slate-400 hover:border-slate-700"
-                        }`}
-                      >
-                        {cfg.icon}
-                        <span className="text-[10px] font-bold uppercase tracking-wider mt-1">{cfg.label}</span>
-                      </button>
-                    );
-                  })}
+              {!inviteOrgId ? (
+                <div className="space-y-2">
+                  <Label>I am a&hellip;</Label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(Object.keys(ROLE_CONFIG) as UserRole[]).map((r) => {
+                      const cfg = ROLE_CONFIG[r];
+                      const isSelected = role === r;
+                      const colorMap = {
+                        emerald: isSelected ? "border-emerald-500 bg-emerald-500/5 text-emerald-400" : "",
+                        cyan: isSelected ? "border-cyan-500 bg-cyan-500/5 text-cyan-400" : "",
+                        amber: isSelected ? "border-amber-500 bg-amber-500/5 text-amber-400" : "",
+                      };
+                      return (
+                        <button
+                          key={r}
+                          type="button"
+                          onClick={() => setRole(r)}
+                          className={`flex flex-col items-center justify-center p-3 rounded-xl border text-center transition-all cursor-pointer ${
+                            isSelected
+                              ? colorMap[cfg.color as keyof typeof colorMap]
+                              : "border-slate-800 bg-slate-950/30 text-slate-400 hover:border-slate-700"
+                          }`}
+                        >
+                          {cfg.icon}
+                          <span className="text-[10px] font-bold uppercase tracking-wider mt-1">{cfg.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[11px] text-slate-500 pl-1">{ROLE_CONFIG[role].description}</p>
                 </div>
-                <p className="text-[11px] text-slate-500 pl-1">{ROLE_CONFIG[role].description}</p>
-              </div>
+              ) : (
+                <div className="p-3 bg-slate-950/40 border border-slate-800/80 rounded-xl text-xs text-slate-400">
+                  You are joining as a staff member with a custom role. Your access permissions are pre-configured.
+                </div>
+              )}
 
               {/* Full Name */}
               <div className="space-y-1.5">
@@ -213,7 +243,7 @@ export default function SignupPage() {
               <div className="space-y-1.5">
                 <Label htmlFor="company-name">
                   Company Name
-                  <span className="text-slate-600 font-normal ml-1">(optional)</span>
+                  {!inviteOrgId && <span className="text-slate-600 font-normal ml-1">(optional)</span>}
                 </Label>
                 <Input
                   id="company-name"
@@ -227,6 +257,7 @@ export default function SignupPage() {
                   onChange={(e) => setCompanyName(e.target.value)}
                   className="bg-slate-950 border-slate-800 focus-visible:ring-emerald-500/20 text-sm"
                   autoComplete="organization"
+                  disabled={!!inviteOrgId}
                 />
               </div>
 
@@ -310,5 +341,19 @@ export default function SignupPage() {
 
       </main>
     </div>
+  );
+}
+
+export default function SignupPage() {
+  return (
+    <Suspense fallback={
+      <div className="relative flex min-h-screen items-center justify-center bg-black text-slate-400 font-sans">
+        <div className="text-center">
+          <p className="text-sm font-semibold tracking-wider uppercase text-slate-600">Loading Invitation Details...</p>
+        </div>
+      </div>
+    }>
+      <SignupPageContent />
+    </Suspense>
   );
 }
