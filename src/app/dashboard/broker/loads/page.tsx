@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import DashboardShell from "@/components/DashboardShell";
-import { getStoredLoads, saveStoredLoads } from "@/lib/stateStore";
+import { supabase, mapDbLoadToUiLoad } from "@/lib/supabase";
 import { Load, Bid } from "@/lib/mockData";
 import { 
   Plus, 
@@ -56,49 +56,89 @@ export default function BrokerLoads() {
   const [weight, setWeight] = useState("");
   const [equipmentType, setEquipmentType] = useState<any>("Dry Van");
   const [description, setDescription] = useState("");
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setLoads(getStoredLoads());
+    const fetchLoads = async () => {
+      const { data, error } = await supabase
+        .from("loads")
+        .select(`
+          *,
+          shipper:profiles!loads_shipper_id_fkey(company_name, full_name),
+          carrier:profiles!loads_carrier_id_fkey(company_name, full_name),
+          bids:bids(
+            *,
+            carrier:profiles!bids_carrier_id_fkey(full_name, company_name)
+          )
+        `)
+        .order("created_at", { ascending: false });
 
-    const handleStateChange = () => {
-      setLoads(getStoredLoads());
+      if (error) {
+        console.error("Error fetching loads:", error);
+      } else if (data) {
+        setLoads(data.map(mapDbLoadToUiLoad));
+      }
+      setLoading(false);
     };
-    window.addEventListener("loadflow_state_change", handleStateChange);
-    return () => window.removeEventListener("loadflow_state_change", handleStateChange);
+
+    fetchLoads();
+
+    const channel = supabase
+      .channel("broker_loads_realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "loads" }, () => {
+        fetchLoads();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "bids" }, () => {
+        fetchLoads();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
-  const handleCreateLoad = (e: React.FormEvent) => {
+  const handleCreateLoad = async (e: React.FormEvent) => {
     e.preventDefault();
     
     const carrierRate = Number(rate);
     const brokerMargin = Number(margin);
-    const newLoad: Load = {
-      id: `L-${Math.floor(1000 + Math.random() * 9000)}`,
-      shipperName: shipperName || "Independent Shipper",
-      carrierName: null,
-      originCity,
-      originState: originState.toUpperCase(),
-      destinationCity,
-      destinationState: destinationState.toUpperCase(),
-      pickupDate: pickupDate || new Date().toISOString().split('T')[0],
-      deliveryDate: deliveryDate || new Date().toISOString().split('T')[0],
-      rate: carrierRate,
-      margin: brokerMargin,
-      shipperPrice: carrierRate + brokerMargin,
-      status: "posted",
-      weightLbs: Number(weight) || 40000,
-      equipmentType,
-      description,
-      createdAt: new Date().toISOString().split('T')[0],
-      bids: []
-    };
 
-    const updated = [newLoad, ...loads];
-    setLoads(updated);
-    saveStoredLoads(updated);
+    // Try to find if a shipper company profile matches
+    const { data: shipperProfiles } = await supabase
+      .from("profiles")
+      .select("id")
+      .eq("role", "shipper")
+      .ilike("company_name", shipperName)
+      .limit(1);
+
+    const shipperId = shipperProfiles?.[0]?.id || null;
+
+    const { error } = await supabase.from("loads").insert({
+      shipper_id: shipperId,
+      origin_city: originCity,
+      origin_state: originState.toUpperCase(),
+      destination_city: destinationCity,
+      destination_state: destinationState.toUpperCase(),
+      pickup_date: pickupDate || new Date().toISOString().split('T')[0],
+      delivery_date: deliveryDate || new Date().toISOString().split('T')[0],
+      carrier_rate: carrierRate,
+      broker_margin: brokerMargin,
+      shipper_price: carrierRate + brokerMargin,
+      status: "posted",
+      weight_lbs: Number(weight) || 40000,
+      equipment_type: equipmentType,
+      description: description
+    });
+
+    if (error) {
+      console.error("Error creating load:", error);
+      alert(error.message || "Failed to create load.");
+      return;
+    }
+
     setIsCreateOpen(false);
 
-    // Reset Form
     setShipperName("");
     setOriginCity("");
     setOriginState("");
@@ -113,57 +153,42 @@ export default function BrokerLoads() {
     setDescription("");
   };
 
-  const handleAcceptBid = (loadId: string, bidId: string) => {
-    const updated = loads.map((load) => {
-      if (load.id === loadId) {
-        const winningBid = load.bids.find(b => b.id === bidId);
-        if (winningBid) {
-          // Accept the winning bid, reject the rest
-          const updatedBids = load.bids.map(b => ({
-            ...b,
-            status: b.id === bidId ? ("accepted" as const) : ("rejected" as const)
-          }));
-          return {
-            ...load,
-            status: "booked" as const,
-            carrierName: winningBid.carrierName,
-            rate: winningBid.amount, // Set the agreed carrier rate
-            shipperPrice: winningBid.amount + load.margin, // recalculate price
-            bids: updatedBids
-          };
-        }
-      }
-      return load;
-    });
-    setLoads(updated);
-    saveStoredLoads(updated);
-    if (selectedLoad && selectedLoad.id === loadId) {
-      setSelectedLoad(updated.find(l => l.id === loadId) || null);
+  const handleAcceptBid = async (loadId: string, bidId: string) => {
+    const { error } = await supabase.rpc("accept_carrier_bid", { p_bid_id: bidId });
+
+    if (error) {
+      console.error("Error accepting bid:", error);
+      alert(error.message || "Failed to accept carrier bid.");
     }
   };
 
-  const handleRejectBid = (loadId: string, bidId: string) => {
-    const updated = loads.map((load) => {
-      if (load.id === loadId) {
-        return {
-          ...load,
-          bids: load.bids.map(b => b.id === bidId ? { ...b, status: "rejected" as const } : b)
-        };
-      }
-      return load;
-    });
-    setLoads(updated);
-    saveStoredLoads(updated);
-    if (selectedLoad && selectedLoad.id === loadId) {
-      setSelectedLoad(updated.find(l => l.id === loadId) || null);
+  const handleRejectBid = async (loadId: string, bidId: string) => {
+    const { error } = await supabase
+      .from("bids")
+      .update({ status: "rejected" })
+      .eq("id", bidId);
+
+    if (error) {
+      console.error("Error rejecting bid:", error);
+      alert(error.message || "Failed to reject bid.");
     }
   };
 
-  const handleDeleteLoad = (loadId: string) => {
-    const updated = loads.filter(l => l.id !== loadId);
-    setLoads(updated);
-    saveStoredLoads(updated);
-    setSelectedLoad(null);
+  const handleDeleteLoad = async (loadId: string) => {
+    const load = loads.find(l => l.id === loadId);
+    if (!load || !(load as any).db_id) return;
+
+    const { error } = await supabase
+      .from("loads")
+      .delete()
+      .eq("id", (load as any).db_id);
+
+    if (error) {
+      console.error("Error deleting load:", error);
+      alert(error.message || "Failed to delete load.");
+    } else {
+      setSelectedLoad(null);
+    }
   };
 
   // Filter loads
@@ -173,6 +198,8 @@ export default function BrokerLoads() {
     const matchesStatus = statusFilter === "all" || load.status === statusFilter;
     return matchesSearch && matchesStatus;
   });
+
+  const activeSelectedLoad = selectedLoad ? loads.find(l => l.id === selectedLoad.id) || selectedLoad : null;
 
   return (
     <DashboardShell activeRole="broker">
@@ -402,7 +429,7 @@ export default function BrokerLoads() {
         <div className="lg:col-span-2 space-y-4">
           {filteredLoads.length > 0 ? (
             filteredLoads.map((load) => {
-              const isActive = selectedLoad?.id === load.id;
+              const isActive = activeSelectedLoad?.id === load.id;
               const hasBids = load.bids.length > 0;
               return (
                 <div 
@@ -489,20 +516,20 @@ export default function BrokerLoads() {
 
         {/* Load Details Panel */}
         <div className="space-y-6">
-          {selectedLoad ? (
+          {activeSelectedLoad ? (
             <Card className="bg-slate-900/50 border-slate-800 backdrop-blur-sm sticky top-6">
               <CardHeader className="border-b border-slate-800/80 pb-4 flex flex-row justify-between items-start">
                 <div>
                   <div className="flex items-center gap-2">
-                    <CardTitle className="text-lg font-bold text-white">{selectedLoad.id}</CardTitle>
-                    <Badge variant="outline" className="text-[10px] capitalize">{selectedLoad.status}</Badge>
+                    <CardTitle className="text-lg font-bold text-white">{activeSelectedLoad.id}</CardTitle>
+                    <Badge variant="outline" className="text-[10px] capitalize">{activeSelectedLoad.status}</Badge>
                   </div>
-                  <CardDescription className="text-xs text-slate-400 mt-1">Shipper: {selectedLoad.shipperName}</CardDescription>
+                  <CardDescription className="text-xs text-slate-400 mt-1">Shipper: {activeSelectedLoad.shipperName}</CardDescription>
                 </div>
                 <Button 
                   variant="ghost" 
                   size="icon" 
-                  onClick={() => handleDeleteLoad(selectedLoad.id)}
+                  onClick={() => handleDeleteLoad(activeSelectedLoad.id)}
                   className="h-8 w-8 text-slate-500 hover:text-red-400 hover:bg-red-500/10 cursor-pointer"
                 >
                   <Trash size={16} />
@@ -516,18 +543,18 @@ export default function BrokerLoads() {
                   <div className="grid grid-cols-2 gap-4">
                     <div className="p-3 bg-slate-950/40 border border-slate-800/60 rounded-xl">
                       <p className="text-[10px] text-slate-500">Origin</p>
-                      <p className="text-sm font-bold text-slate-200 mt-1">{selectedLoad.originCity}, {selectedLoad.originState}</p>
+                      <p className="text-sm font-bold text-slate-200 mt-1">{activeSelectedLoad.originCity}, {activeSelectedLoad.originState}</p>
                       <p className="text-[10px] text-slate-400 flex items-center gap-1 mt-1">
                         <Calendar size={10} />
-                        {selectedLoad.pickupDate}
+                        {activeSelectedLoad.pickupDate}
                       </p>
                     </div>
                     <div className="p-3 bg-slate-950/40 border border-slate-800/60 rounded-xl">
                       <p className="text-[10px] text-slate-500">Destination</p>
-                      <p className="text-sm font-bold text-slate-200 mt-1">{selectedLoad.destinationCity}, {selectedLoad.destinationState}</p>
+                      <p className="text-sm font-bold text-slate-200 mt-1">{activeSelectedLoad.destinationCity}, {activeSelectedLoad.destinationState}</p>
                       <p className="text-[10px] text-slate-400 flex items-center gap-1 mt-1">
                         <Calendar size={10} />
-                        {selectedLoad.deliveryDate}
+                        {activeSelectedLoad.deliveryDate}
                       </p>
                     </div>
                   </div>
@@ -538,15 +565,15 @@ export default function BrokerLoads() {
                   <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Cargo Details</h4>
                   <div className="grid grid-cols-2 gap-y-3 text-xs">
                     <div className="text-slate-400">Equipment Type:</div>
-                    <div className="text-slate-200 font-bold text-right">{selectedLoad.equipmentType}</div>
+                    <div className="text-slate-200 font-bold text-right">{activeSelectedLoad.equipmentType}</div>
                     <div className="text-slate-400">Weight:</div>
-                    <div className="text-slate-200 font-bold text-right">{selectedLoad.weightLbs.toLocaleString()} lbs</div>
+                    <div className="text-slate-200 font-bold text-right">{activeSelectedLoad.weightLbs.toLocaleString()} lbs</div>
                     <div className="text-slate-400">Created At:</div>
-                    <div className="text-slate-500 font-medium text-right">{selectedLoad.createdAt}</div>
+                    <div className="text-slate-500 font-medium text-right">{activeSelectedLoad.createdAt}</div>
                   </div>
-                  {selectedLoad.description && (
+                  {activeSelectedLoad.description && (
                     <div className="p-3 bg-slate-950/30 text-xs text-slate-400 rounded-xl italic">
-                      Note: "{selectedLoad.description}"
+                      Note: "{activeSelectedLoad.description}"
                     </div>
                   )}
                 </div>
@@ -556,22 +583,22 @@ export default function BrokerLoads() {
                   <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Financial Breakdown</h4>
                   <div className="grid grid-cols-2 gap-y-2 text-xs">
                     <div className="text-slate-400">Shipper Pays:</div>
-                    <div className="text-slate-200 font-bold text-right">${selectedLoad.shipperPrice.toLocaleString()}</div>
+                    <div className="text-slate-200 font-bold text-right">${activeSelectedLoad.shipperPrice.toLocaleString()}</div>
                     <div className="text-slate-400">Carrier Paid Rate:</div>
-                    <div className="text-slate-200 font-bold text-right">${selectedLoad.rate.toLocaleString()}</div>
+                    <div className="text-slate-200 font-bold text-right">${activeSelectedLoad.rate.toLocaleString()}</div>
                     <div className="text-slate-400">Broker Margin:</div>
-                    <div className="text-emerald-400 font-bold text-right">${selectedLoad.margin.toLocaleString()}</div>
+                    <div className="text-emerald-400 font-bold text-right">${activeSelectedLoad.margin.toLocaleString()}</div>
                   </div>
                 </div>
 
                 {/* Bidding Manager */}
                 <div className="space-y-3.5 border-t border-slate-800/40 pt-4">
-                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Incoming Bids ({selectedLoad.bids.length})</h4>
+                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Incoming Bids ({activeSelectedLoad.bids.length})</h4>
                   
-                  {selectedLoad.status === "posted" ? (
-                    selectedLoad.bids.length > 0 ? (
+                  {activeSelectedLoad.status === "posted" ? (
+                    activeSelectedLoad.bids.length > 0 ? (
                       <div className="space-y-3">
-                        {selectedLoad.bids.map((bid) => {
+                        {activeSelectedLoad.bids.map((bid) => {
                           const isDeclined = bid.status === "rejected";
                           return (
                             <div 
@@ -592,14 +619,14 @@ export default function BrokerLoads() {
                                 <div className="flex gap-2">
                                   <Button 
                                     size="icon" 
-                                    onClick={() => handleRejectBid(selectedLoad.id, bid.id)}
+                                    onClick={() => handleRejectBid(activeSelectedLoad.id, bid.id)}
                                     className="h-8 w-8 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 rounded-lg cursor-pointer"
                                   >
                                     <X size={14} />
                                   </Button>
                                   <Button 
                                     size="icon"
-                                    onClick={() => handleAcceptBid(selectedLoad.id, bid.id)}
+                                    onClick={() => handleAcceptBid(activeSelectedLoad.id, bid.id)}
                                     className="h-8 w-8 bg-emerald-500 hover:bg-emerald-600 text-black font-semibold rounded-lg cursor-pointer"
                                   >
                                     <Check size={14} strokeWidth={3} />
@@ -621,7 +648,7 @@ export default function BrokerLoads() {
                       <FileCheck2 size={16} />
                       <div>
                         <p className="font-bold">Booked Carrier</p>
-                        <p className="text-[10px] text-slate-400 mt-0.5">{selectedLoad.carrierName || "Pending allocation"}</p>
+                        <p className="text-[10px] text-slate-400 mt-0.5">{activeSelectedLoad.carrierName || "Pending allocation"}</p>
                       </div>
                     </div>
                   )}

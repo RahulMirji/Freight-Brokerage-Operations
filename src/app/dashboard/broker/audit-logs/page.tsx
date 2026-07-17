@@ -2,8 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import DashboardShell from "@/components/DashboardShell";
-import { getStoredLoads, getStoredCompliance } from "@/lib/stateStore";
-import { Load, CarrierCompliance } from "@/lib/mockData";
+import { supabase } from "@/lib/supabase";
 import { 
   Clock, 
   Search, 
@@ -36,124 +35,81 @@ export default function BrokerAuditLogs() {
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [selectedLog, setSelectedLog] = useState<AuditLog | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const getLogDetails = (log: any): string => {
+    const payload = log.payload || {};
+    const origin = payload.origin || '';
+    const dest = payload.destination || '';
+    
+    switch (log.action) {
+      case "LOAD_CREATION":
+        return `Freight load requested: ${payload.display_id || 'Load'} (${origin} ➔ ${dest})`;
+      case "BID_SUBMISSION":
+        return `Bid of $${payload.amount?.toLocaleString()} placed on load ${payload.load_display_id || 'Load'}`;
+      case "BID_ACCEPTED":
+        return `Broker accepted bid of $${payload.amount?.toLocaleString()} on load ${payload.load_display_id || 'Load'}`;
+      case "BID_REJECTED":
+        return `Broker declined bid of $${payload.amount?.toLocaleString()} on load ${payload.load_display_id || 'Load'}`;
+      case "CONTRACT_SIGNED":
+        return `Rate Confirmation digitally signed by ${payload.signatory || 'Carrier'} for load ${payload.display_id || 'Load'}`;
+      case "DISPATCH_START":
+        return `Driver dispatched. Cargo in transit for load ${payload.display_id || 'Load'}`;
+      case "DISPATCH_DELIVERY":
+        return `Cargo marked delivered at destination for load ${payload.display_id || 'Load'}`;
+      case "LOAD_BOOKED":
+        return `Load ${payload.display_id || 'Load'} status updated: Booked`;
+      case "LOAD_COMPLETED":
+        return `Load ${payload.display_id || 'Load'} status updated: Completed & Paid`;
+      case "LOAD_CANCELLED":
+        return `Load ${payload.display_id || 'Load'} status updated: Cancelled`;
+      default:
+        return payload.details || `${log.action.replace("_", " ")} executed.`;
+    }
+  };
 
   useEffect(() => {
-    const loads = getStoredLoads();
-    const compliance = getStoredCompliance();
+    const fetchLogs = async () => {
+      const { data, error } = await supabase
+        .from("audit_logs")
+        .select(`
+          *,
+          actor:profiles(company_name, full_name)
+        `)
+        .order("created_at", { ascending: false });
 
-    // Dynamically generate audit logs based on current data state
-    const generatedLogs: AuditLog[] = [];
-
-    // System Startup Logs
-    generatedLogs.push({
-      id: "LOG-1001",
-      timestamp: "2026-07-14T08:00:00Z",
-      actor: "System Engine",
-      role: "system",
-      action: "SYSTEM_BOOT",
-      details: "LoadFlow logistics server instance successfully initialized.",
-      metadata: { env: "production", version: "1.0.0", node: "railway-us-east" }
-    });
-
-    // Compliance logs from initial compliance
-    compliance.forEach((c, index) => {
-      generatedLogs.push({
-        id: `LOG-200${index}`,
-        timestamp: `2026-07-15T09:12:${index * 5}Z`,
-        actor: "Broker Compliance Engine",
-        role: "broker",
-        action: "COMPLIANCE_AUDIT",
-        details: `Carrier ${c.companyName} checked. Status: ${c.insuranceStatus.toUpperCase()}`,
-        metadata: { carrier: c.companyName, mc: c.mcNumber, status: c.insuranceStatus, safetyRating: c.safetyRating }
-      });
-    });
-
-    // Load logs
-    loads.forEach((l) => {
-      // 1. Creation
-      generatedLogs.push({
-        id: `LOG-300-${l.id}`,
-        timestamp: `${l.createdAt}T09:30:00Z`,
-        actor: l.shipperName,
-        role: "shipper",
-        action: "LOAD_CREATION",
-        details: `Freight load requested: ${l.id} (${l.originCity}, ${l.originState} ➔ ${l.destinationCity}, ${l.destinationState})`,
-        metadata: { loadId: l.id, shipper: l.shipperName, budget: l.shipperPrice, equipment: l.equipmentType }
-      });
-
-      // 2. Bids
-      l.bids.forEach((b, bIdx) => {
-        generatedLogs.push({
-          id: `LOG-400-${l.id}-${bIdx}`,
-          timestamp: b.submittedAt,
-          actor: b.carrierName,
-          role: "carrier",
-          action: "BID_SUBMISSION",
-          details: `Bid of $${b.amount.toLocaleString()} placed on load ${l.id}`,
-          metadata: { loadId: l.id, carrier: b.carrierName, amount: b.amount, mc: b.carrierMc, bidStatus: b.status }
-        });
-
-        // If bid is accepted
-        if (b.status === "accepted") {
-          generatedLogs.push({
-            id: `LOG-500-${l.id}-${bIdx}`,
-            timestamp: b.submittedAt, // approx same time for mock
-            actor: "Broker Manager",
-            role: "broker",
-            action: "BID_ACCEPTANCE",
-            details: `Broker accepted bid from ${b.carrierName} ($${b.amount.toLocaleString()}) on load ${l.id}`,
-            metadata: { loadId: l.id, carrier: b.carrierName, rate: b.amount, margin: l.margin }
-          });
+      if (error) {
+        console.error("Error fetching logs:", error);
+      } else if (data) {
+        const mappedLogs: AuditLog[] = data.map((log: any) => ({
+          id: log.id,
+          timestamp: log.created_at,
+          actor: log.actor?.company_name || log.actor?.full_name || "System Engine",
+          role: (log.actor_role || "system") as any,
+          action: log.action,
+          details: getLogDetails(log),
+          metadata: log.payload || {}
+        }));
+        setLogs(mappedLogs);
+        if (mappedLogs.length > 0 && !selectedLog) {
+          setSelectedLog(mappedLogs[0]);
         }
-      });
-
-      // 3. Digital signature contract
-      if (l.carrierSignature) {
-        generatedLogs.push({
-          id: `LOG-600-${l.id}`,
-          timestamp: l.signedAt || `${l.createdAt}T14:00:00Z`,
-          actor: l.carrierName || "Carrier Dispatcher",
-          role: "carrier",
-          action: "CONTRACT_SIGNATURE",
-          details: `Rate Confirmation digitally signed by ${l.carrierSignature} for load ${l.id}`,
-          metadata: { loadId: l.id, signatory: l.carrierSignature, signedAt: l.signedAt, carrier: l.carrierName }
-        });
       }
+      setLoading(false);
+    };
 
-      // 4. In Transit / Dispatch progress
-      if (l.status === "in_transit" || l.status === "delivered" || l.status === "completed") {
-        generatedLogs.push({
-          id: `LOG-700-${l.id}`,
-          timestamp: `${l.createdAt}T15:20:00Z`,
-          actor: l.carrierName || "Carrier Dispatcher",
-          role: "carrier",
-          action: "DISPATCH_START",
-          details: `Driver dispatched. Cargo in transit for load ${l.id}`,
-          metadata: { loadId: l.id, carrier: l.carrierName }
-        });
-      }
+    fetchLogs();
 
-      if (l.status === "delivered" || l.status === "completed") {
-        generatedLogs.push({
-          id: `LOG-800-${l.id}`,
-          timestamp: `${l.createdAt}T17:45:00Z`,
-          actor: l.carrierName || "Driver GPS",
-          role: "carrier",
-          action: "DISPATCH_DELIVERY",
-          details: `Cargo marked delivered at destination for load ${l.id}`,
-          metadata: { loadId: l.id, carrier: l.carrierName }
-        });
-      }
-    });
+    const channel = supabase
+      .channel("audit_logs_realtime")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "audit_logs" }, () => {
+        fetchLogs();
+      })
+      .subscribe();
 
-    // Sort by timestamp descending
-    generatedLogs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-    setLogs(generatedLogs);
-    
-    // Select first by default
-    if (generatedLogs.length > 0) {
-      setSelectedLog(generatedLogs[0]);
-    }
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   const getActorBadge = (role: AuditLog["role"]) => {

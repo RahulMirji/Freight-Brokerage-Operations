@@ -4,10 +4,7 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import DashboardShell from "@/components/DashboardShell";
 import WrongPortalBannerWrapper from "@/components/WrongPortalBanner";
-import { 
-  getStoredLoads, 
-  getStoredCompliance 
-} from "@/lib/stateStore";
+import { supabase, mapDbLoadToUiLoad, mapDbComplianceToUiCompliance } from "@/lib/supabase";
 import { Load, CarrierCompliance } from "@/lib/mockData";
 import { 
   TrendingUp, 
@@ -26,17 +23,60 @@ import { Badge } from "@/components/ui/badge";
 export default function BrokerOverview() {
   const [loads, setLoads] = useState<Load[]>([]);
   const [compliance, setCompliance] = useState<CarrierCompliance[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setLoads(getStoredLoads());
-    setCompliance(getStoredCompliance());
+    const fetchBrokerData = async () => {
+      // 1. Fetch loads
+      const { data: loadsData } = await supabase
+        .from("loads")
+        .select(`
+          *,
+          shipper:profiles!loads_shipper_id_fkey(company_name, full_name),
+          carrier:profiles!loads_carrier_id_fkey(company_name, full_name),
+          bids:bids(
+            *,
+            carrier:profiles!bids_carrier_id_fkey(full_name, company_name)
+          )
+        `)
+        .order("created_at", { ascending: false });
 
-    const handleStateChange = () => {
-      setLoads(getStoredLoads());
-      setCompliance(getStoredCompliance());
+      if (loadsData) {
+        setLoads(loadsData.map(mapDbLoadToUiLoad));
+      }
+
+      // 2. Fetch compliance
+      const { data: compData } = await supabase
+        .from("carrier_compliance")
+        .select(`
+          *,
+          carrier:profiles(company_name, full_name)
+        `);
+
+      if (compData) {
+        setCompliance(compData.map(mapDbComplianceToUiCompliance));
+      }
+      setLoading(false);
     };
-    window.addEventListener("loadflow_state_change", handleStateChange);
-    return () => window.removeEventListener("loadflow_state_change", handleStateChange);
+
+    fetchBrokerData();
+
+    const channel = supabase
+      .channel("broker_realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "loads" }, () => {
+        fetchBrokerData();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "bids" }, () => {
+        fetchBrokerData();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "carrier_compliance" }, () => {
+        fetchBrokerData();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   // Compute metrics
