@@ -43,13 +43,7 @@ export async function GET(request: NextRequest) {
       const { data: { user } } = await supabase.auth.getUser();
 
       if (user) {
-        const { data: profile } = await supabase
-          .from("profiles")
-          .select("role")
-          .eq("id", user.id)
-          .single();
-
-        const role = profile?.role ?? "shipper";
+        const role = user.user_metadata?.role ?? "shipper";
         return NextResponse.redirect(`${origin}/dashboard/${role}`);
       }
     }

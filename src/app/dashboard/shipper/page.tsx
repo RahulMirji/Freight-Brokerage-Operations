@@ -3,8 +3,9 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import DashboardShell from "@/components/DashboardShell";
-import { getStoredLoads } from "@/lib/stateStore";
+import WrongPortalBannerWrapper from "@/components/WrongPortalBanner";
 import { Load } from "@/lib/mockData";
+import { supabase, mapDbLoadToUiLoad } from "@/lib/supabase";
 import { 
   Package, 
   DollarSign, 
@@ -25,31 +26,68 @@ import { Button } from "@/components/ui/button";
 export default function ShipperOverview() {
   const [loads, setLoads] = useState<Load[]>([]);
   const [selectedLoad, setSelectedLoad] = useState<Load | null>(null);
-
-  // We assume the logged in Shipper is "Cargill Agriculture"
-  const SHIPPER_NAME = "Cargill Agriculture";
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setLoads(getStoredLoads());
+    const fetchLoads = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-    const handleStateChange = () => {
-      setLoads(getStoredLoads());
+      const { data, error } = await supabase
+        .from("loads")
+        .select(`
+          *,
+          shipper:profiles!loads_shipper_id_fkey(full_name, company_name),
+          carrier:profiles!loads_carrier_id_fkey(full_name, company_name),
+          bids:bids(
+            *,
+            carrier:profiles!bids_carrier_id_fkey(full_name, company_name)
+          )
+        `)
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        console.error("Error fetching loads:", error);
+      } else if (data) {
+        setLoads(data.map(mapDbLoadToUiLoad));
+      }
+      setLoading(false);
     };
-    window.addEventListener("loadflow_state_change", handleStateChange);
-    return () => window.removeEventListener("loadflow_state_change", handleStateChange);
+
+    fetchLoads();
+
+    const channel = supabase
+      .channel("shipper_loads_realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "loads" }, () => {
+        fetchLoads();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "bids" }, () => {
+        fetchLoads();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
-  // Filter loads requested by this shipper
-  const myLoads = loads.filter(l => l.shipperName.toLowerCase().includes(SHIPPER_NAME.toLowerCase()) || l.shipperName === "Cargill Agriculture" || l.shipperName === "Independent Shipper");
+  // Filter loads requested by this shipper (RLS does this, so we just use all fetched loads)
+  const myLoads = loads;
+
+  // Compute reactive selected load to update details instantly on real-time changes
+  const activeSelectedLoad = selectedLoad ? loads.find(l => l.id === selectedLoad.id) || selectedLoad : null;
 
   // Metrics
   const activeCount = myLoads.filter(l => ["posted", "booked", "in_transit", "delivered"].includes(l.status)).length;
   const completedCount = myLoads.filter(l => l.status === "completed").length;
   const totalSpend = myLoads.reduce((acc, curr) => acc + curr.shipperPrice, 0);
 
+
   return (
     <DashboardShell activeRole="shipper">
       
+      <WrongPortalBannerWrapper />
+
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
         <div>
@@ -122,7 +160,7 @@ export default function ShipperOverview() {
 
           {myLoads.length > 0 ? (
             myLoads.map((load) => {
-              const isActive = selectedLoad?.id === load.id;
+              const isActive = activeSelectedLoad?.id === load.id;
               return (
                 <div 
                   key={load.id}
@@ -193,7 +231,7 @@ export default function ShipperOverview() {
 
         {/* Shipment Tracker visual panel */}
         <div className="space-y-6">
-          {selectedLoad ? (
+          {activeSelectedLoad ? (
             <Card className="bg-slate-900/50 border-slate-800 backdrop-blur-sm sticky top-6">
               
               <CardHeader className="border-b border-slate-800/80 pb-4">
@@ -201,7 +239,7 @@ export default function ShipperOverview() {
                   <Activity size={18} className="text-amber-400" />
                   Live Cargo Tracker
                 </CardTitle>
-                <CardDescription className="text-xs text-slate-400 mt-1">ID: {selectedLoad.id} • Carrier: {selectedLoad.carrierName || "Unassigned"}</CardDescription>
+                <CardDescription className="text-xs text-slate-400 mt-1">ID: {activeSelectedLoad.id} • Carrier: {activeSelectedLoad.carrierName || "Unassigned"}</CardDescription>
               </CardHeader>
 
               <CardContent className="pt-6">
@@ -213,23 +251,23 @@ export default function ShipperOverview() {
                   {/* Glowing route line */}
                   <svg className="absolute w-full h-full p-6 text-slate-600" viewBox="0 0 100 100" preserveAspectRatio="none">
                     <path d="M 10 50 Q 50 10 90 50" fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray="4 4" />
-                    {selectedLoad.status === "in_transit" && (
+                    {activeSelectedLoad.status === "in_transit" && (
                       <path d="M 10 50 Q 50 10 50 25" fill="none" stroke="#f59e0b" strokeWidth="3" className="animate-pulse" />
                     )}
-                    {["delivered", "completed"].includes(selectedLoad.status) && (
+                    {["delivered", "completed"].includes(activeSelectedLoad.status) && (
                       <path d="M 10 50 Q 50 10 90 50" fill="none" stroke="#10b981" strokeWidth="3" />
                     )}
                   </svg>
                   {/* Origin point */}
                   <div className="absolute left-[34px] top-[48px] h-3 w-3 rounded-full bg-amber-500 border-2 border-slate-900 shadow-[0_0_10px_#f59e0b]" />
-                  <span className="absolute left-6 top-[66px] text-[9px] font-bold text-slate-500 uppercase">{selectedLoad.originCity}</span>
+                  <span className="absolute left-6 top-[66px] text-[9px] font-bold text-slate-500 uppercase">{activeSelectedLoad.originCity}</span>
                   
                   {/* Destination point */}
                   <div className="absolute right-[34px] top-[48px] h-3 w-3 rounded-full bg-slate-600 border-2 border-slate-900" />
-                  <span className="absolute right-6 top-[66px] text-[9px] font-bold text-slate-500 uppercase">{selectedLoad.destinationCity}</span>
+                  <span className="absolute right-6 top-[66px] text-[9px] font-bold text-slate-500 uppercase">{activeSelectedLoad.destinationCity}</span>
 
                   {/* Active vehicle indicator */}
-                  {selectedLoad.status === "in_transit" && (
+                  {activeSelectedLoad.status === "in_transit" && (
                     <div className="absolute left-1/2 top-[24px] -translate-x-1/2 flex flex-col items-center gap-1">
                       <div className="h-6 w-6 rounded-full bg-amber-500/20 flex items-center justify-center animate-bounce border border-amber-500/30">
                         <Truck size={12} className="text-amber-400" />
@@ -238,13 +276,13 @@ export default function ShipperOverview() {
                     </div>
                   )}
 
-                  {selectedLoad.status === "booked" && (
+                  {activeSelectedLoad.status === "booked" && (
                     <div className="absolute left-[38px] top-[30px] flex flex-col items-center gap-1">
                       <span className="bg-slate-900/80 border border-slate-800 text-[8px] font-bold text-slate-200 px-1 py-0.25 rounded">AT ORIGIN</span>
                     </div>
                   )}
 
-                  {["delivered", "completed"].includes(selectedLoad.status) && (
+                  {["delivered", "completed"].includes(activeSelectedLoad.status) && (
                     <div className="absolute right-[24px] top-[26px] flex flex-col items-center gap-1">
                       <div className="h-5 w-5 rounded-full bg-emerald-500/20 flex items-center justify-center border border-emerald-500/30">
                         <CheckCircle size={10} className="text-emerald-400" />
@@ -260,16 +298,16 @@ export default function ShipperOverview() {
                   {/* Step 1: Dispatched */}
                   <div className="relative">
                     <div className={`absolute -left-[21px] mt-0.5 h-2.5 w-2.5 rounded-full ring-4 ring-slate-950 ${
-                      ["booked", "in_transit", "delivered", "completed"].includes(selectedLoad.status) ? "bg-emerald-400" : "bg-slate-700"
+                      ["booked", "in_transit", "delivered", "completed"].includes(activeSelectedLoad.status) ? "bg-emerald-400" : "bg-slate-700"
                     }`} />
                     <p className="font-bold text-slate-200">Load Dispatched & Booked</p>
-                    <p className="text-[10px] text-slate-500 mt-0.5">Carrier allocated: {selectedLoad.carrierName || "Awaiting Broker matching"}</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Carrier allocated: {activeSelectedLoad.carrierName || "Awaiting Broker matching"}</p>
                   </div>
 
                   {/* Step 2: In Transit */}
                   <div className="relative">
                     <div className={`absolute -left-[21px] mt-0.5 h-2.5 w-2.5 rounded-full ring-4 ring-slate-950 ${
-                      ["in_transit", "delivered", "completed"].includes(selectedLoad.status) ? "bg-emerald-400" : "bg-slate-700"
+                      ["in_transit", "delivered", "completed"].includes(activeSelectedLoad.status) ? "bg-emerald-400" : "bg-slate-700"
                     }`} />
                     <p className="font-bold text-slate-200">In Transit (On Route)</p>
                     <p className="text-[10px] text-slate-500 mt-0.5">Estimated coordinate check-ins active.</p>
@@ -278,7 +316,7 @@ export default function ShipperOverview() {
                   {/* Step 3: Arrived */}
                   <div className="relative">
                     <div className={`absolute -left-[21px] mt-0.5 h-2.5 w-2.5 rounded-full ring-4 ring-slate-950 ${
-                      ["delivered", "completed"].includes(selectedLoad.status) ? "bg-emerald-400" : "bg-slate-700"
+                      ["delivered", "completed"].includes(activeSelectedLoad.status) ? "bg-emerald-400" : "bg-slate-700"
                     }`} />
                     <p className="font-bold text-slate-200">Delivered at Destination</p>
                     <p className="text-[10px] text-slate-500 mt-0.5">Proof of Delivery (POD) pending audit checks.</p>
@@ -304,3 +342,4 @@ export default function ShipperOverview() {
     </DashboardShell>
   );
 }
+

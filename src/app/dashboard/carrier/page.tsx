@@ -13,6 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import Link from "next/link";
 import DashboardShell from "@/components/DashboardShell";
+import WrongPortalBannerWrapper from "@/components/WrongPortalBanner";
 import { getStoredLoads, saveStoredLoads, getStoredCompliance } from "@/lib/stateStore";
 import { Load, CarrierCompliance } from "@/lib/mockData";
 import { 
@@ -154,6 +155,8 @@ export default function CarrierOverview() {
   return (
     <DashboardShell activeRole="carrier">
       
+      <WrongPortalBannerWrapper />
+
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
         <div>

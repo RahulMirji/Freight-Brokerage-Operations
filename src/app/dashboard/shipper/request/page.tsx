@@ -3,8 +3,7 @@
 import React, { useState } from "react";
 import { useRouter } from "next/navigation";
 import DashboardShell from "@/components/DashboardShell";
-import { getStoredLoads, saveStoredLoads } from "@/lib/stateStore";
-import { Load } from "@/lib/mockData";
+import { supabase } from "@/lib/supabase";
 import { 
   PlusCircle, 
   MapPin, 
@@ -14,7 +13,8 @@ import {
   DollarSign, 
   ArrowLeft,
   ChevronRight,
-  FileCheck2
+  FileCheck2,
+  AlertCircle
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -37,11 +37,13 @@ export default function ShipperRequest() {
   const [equipmentType, setEquipmentType] = useState<any>("Dry Van");
   const [description, setDescription] = useState("");
   const [success, setSuccess] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  const SHIPPER_NAME = "Cargill Agriculture";
-
-  const handleSubmitRequest = (e: React.FormEvent) => {
+  const handleSubmitRequest = async (e: React.FormEvent) => {
     e.preventDefault();
+    setLoading(true);
+    setError(null);
 
     const price = Number(budgetRate);
     
@@ -49,32 +51,39 @@ export default function ShipperRequest() {
     const margin = Math.round(price * 0.15);
     const rate = price - margin;
 
-    const newLoad: Load = {
-      id: `L-${Math.floor(1000 + Math.random() * 9000)}`,
-      shipperName: SHIPPER_NAME,
-      carrierName: null,
-      originCity,
-      originState: originState.toUpperCase(),
-      destinationCity,
-      destinationState: destinationState.toUpperCase(),
-      pickupDate: pickupDate || new Date().toISOString().split('T')[0],
-      deliveryDate: deliveryDate || new Date().toISOString().split('T')[0],
-      rate,
-      margin,
-      shipperPrice: price,
-      status: "posted",
-      weightLbs: Number(weight) || 42000,
-      equipmentType,
-      description,
-      createdAt: new Date().toISOString().split('T')[0],
-      bids: []
-    };
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      setError("You must be logged in to request a shipment.");
+      setLoading(false);
+      return;
+    }
 
-    const currentLoads = getStoredLoads();
-    const updated = [newLoad, ...currentLoads];
-    saveStoredLoads(updated);
+    const { error: insertError } = await supabase.from("loads").insert({
+      shipper_id: user.id,
+      origin_city: originCity,
+      origin_state: originState.toUpperCase(),
+      destination_city: destinationCity,
+      destination_state: destinationState.toUpperCase(),
+      pickup_date: pickupDate || new Date().toISOString().split('T')[0],
+      delivery_date: deliveryDate || new Date().toISOString().split('T')[0],
+      carrier_rate: rate,
+      broker_margin: margin,
+      shipper_price: price,
+      status: "posted",
+      weight_lbs: Number(weight) || 42000,
+      equipment_type: equipmentType,
+      description: description
+    });
+
+    if (insertError) {
+      console.error("Error creating load:", insertError);
+      setError(insertError.message || "Failed to create shipment request. Please try again.");
+      setLoading(false);
+      return;
+    }
 
     setSuccess(true);
+    setLoading(false);
     setTimeout(() => {
       setSuccess(false);
       router.push("/dashboard/shipper");
@@ -110,6 +119,13 @@ export default function ShipperRequest() {
 
           <CardContent className="pt-6">
             <form onSubmit={handleSubmitRequest} className="space-y-4">
+              
+              {error && (
+                <div className="flex items-start gap-2.5 rounded-xl border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-400">
+                  <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{error}</span>
+                </div>
+              )}
               
               <div className="grid grid-cols-2 gap-4">
                 
@@ -263,9 +279,10 @@ export default function ShipperRequest() {
                 </Button>
                 <Button 
                   type="submit" 
-                  className="bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-black font-semibold rounded-xl px-6"
+                  disabled={loading}
+                  className="bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-black font-semibold rounded-xl px-6 disabled:opacity-50"
                 >
-                  Publish Shipping Request
+                  {loading ? "Publishing..." : "Publish Shipping Request"}
                 </Button>
               </div>
 

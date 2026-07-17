@@ -42,14 +42,8 @@ export default function LoginPage() {
       return;
     }
 
-    // Fetch profile to determine which dashboard to redirect to
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", data.user.id)
-      .single();
-
-    const role = profile?.role ?? "shipper";
+    // Get the role from JWT metadata
+    const role = data.user.user_metadata?.role ?? "shipper";
     router.push(`/dashboard/${role}`);
     router.refresh();
   };

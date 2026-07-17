@@ -1,6 +1,13 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
+// Maps each dashboard path prefix to the role that is allowed to access it
+const ROLE_ROUTE_MAP: Record<string, string> = {
+  "/dashboard/broker": "broker",
+  "/dashboard/carrier": "carrier",
+  "/dashboard/shipper": "shipper",
+};
+
 export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
@@ -25,32 +32,44 @@ export async function proxy(request: NextRequest) {
     }
   );
 
-  // Refresh session — MUST be done before any redirect logic.
-  // This keeps the session cookie fresh for long-lived sessions.
+  // Refresh session — MUST run before any redirect logic to keep cookies fresh.
   const { data: { user } } = await supabase.auth.getUser();
 
   const { pathname } = request.nextUrl;
 
-  // Protect all /dashboard/* routes — redirect to login if not authenticated
+  // ── 1. Unauthenticated: block all /dashboard/* routes ──────────────────────
   if (pathname.startsWith("/dashboard") && !user) {
     const loginUrl = request.nextUrl.clone();
     loginUrl.pathname = "/login";
     return NextResponse.redirect(loginUrl);
   }
 
-  // If already logged in, redirect away from auth pages
-  if ((pathname === "/login" || pathname === "/signup") && user) {
-    // Get user's role from Supabase metadata to redirect to the right portal
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+  // ── 2. Authenticated: fetch the user's role once ───────────────────────────
+  if (user) {
+    // Get the role from the JWT metadata instead of a DB query (faster, avoids Edge RLS issues)
+    const userRole = user.user_metadata?.role ?? "shipper";
 
-    const role = profile?.role ?? "shipper";
-    const dashboardUrl = request.nextUrl.clone();
-    dashboardUrl.pathname = `/dashboard/${role}`;
-    return NextResponse.redirect(dashboardUrl);
+    // ── 3. Block /login and /signup if already signed in ────────────────────
+    if (pathname === "/login" || pathname === "/signup") {
+      const dashboardUrl = request.nextUrl.clone();
+      dashboardUrl.pathname = `/dashboard/${userRole}`;
+      return NextResponse.redirect(dashboardUrl);
+    }
+
+    // ── 4. ROLE ENFORCEMENT — the key fix ────────────────────────────────────
+    // Check which role this dashboard route requires
+    const requiredRole = Object.entries(ROLE_ROUTE_MAP).find(([prefix]) =>
+      pathname.startsWith(prefix)
+    )?.[1];
+
+    if (requiredRole && requiredRole !== userRole) {
+      // User is authenticated but accessing the WRONG portal.
+      // Redirect them to their correct dashboard with an error flag.
+      const correctUrl = request.nextUrl.clone();
+      correctUrl.pathname = `/dashboard/${userRole}`;
+      correctUrl.searchParams.set("error", "wrong_portal");
+      return NextResponse.redirect(correctUrl);
+    }
   }
 
   return supabaseResponse;

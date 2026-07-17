@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import DashboardShell from "@/components/DashboardShell";
+import WrongPortalBannerWrapper from "@/components/WrongPortalBanner";
 import { 
   getStoredLoads, 
   getStoredCompliance 
@@ -50,6 +51,8 @@ export default function BrokerOverview() {
   return (
     <DashboardShell activeRole="broker">
       
+      <WrongPortalBannerWrapper />
+
       {/* Page Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
         <div>
