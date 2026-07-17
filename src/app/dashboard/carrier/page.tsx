@@ -27,7 +27,10 @@ import {
   CheckCircle,
   FileCheck,
   ChevronRight,
-  TrendingUp
+  TrendingUp,
+  Upload,
+  FileCheck2,
+  Loader2
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -41,6 +44,8 @@ export default function CarrierOverview() {
   const [agreeTerms, setAgreeTerms] = useState(false);
   const [loading, setLoading] = useState(true);
   const [latestRateConfirmation, setLatestRateConfirmation] = useState<any>(null);
+  // Per-load POD upload state: { [loadDbId]: 'uploading' | 'success' | 'error' | undefined }
+  const [podStatus, setPodStatus] = useState<Record<string, string>>({});
 
   // New tab state
   const [activeTab, setActiveTab] = useState<"overview" | "staff">("overview");
@@ -469,44 +474,72 @@ export default function CarrierOverview() {
                   {/* POD Uploader */}
                   {load.status !== "booked" && !load.podUrl && (
                     <div className="space-y-2 mt-4 pt-4 border-t border-slate-800/40">
-                      <Label className="text-[10px] text-slate-500 uppercase font-bold">Proof of Delivery (POD) Uploader</Label>
-                      <div className="flex gap-2">
-                        <Input 
-                          id={`pod-input-${load.id}`}
-                          placeholder="e.g. POD-signed-bill.pdf" 
-                          className="bg-slate-950 border-slate-850 text-xs h-8 focus-visible:ring-cyan-500/20 text-slate-300"
-                        />
-                        <Button 
-                          size="sm"
-                          onClick={async () => {
-                            const el = document.getElementById(`pod-input-${load.id}`) as HTMLInputElement;
-                            const val = el?.value?.trim();
-                            if (!val) {
-                              alert("Please enter a valid document name.");
-                              return;
-                            }
-                            const { error } = await supabase
-                              .from("loads")
-                              .update({ pod_url: val })
-                              .eq("id", (load as any).db_id);
-                            if (error) {
-                              alert(error.message);
-                            } else {
-                              alert("POD uploaded successfully!");
-                            }
-                          }}
-                          className="bg-cyan-500 hover:bg-cyan-600 text-black font-semibold text-xs px-3 h-8 cursor-pointer"
-                        >
-                          Upload
-                        </Button>
-                      </div>
+                      <Label className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Proof of Delivery (POD)</Label>
+                      <label
+                        htmlFor={`pod-file-${load.id}`}
+                        className={`flex items-center justify-center gap-2 w-full h-9 rounded-lg border border-dashed text-xs font-semibold cursor-pointer transition-colors ${
+                          podStatus[(load as any).db_id] === "uploading"
+                            ? "border-cyan-500/40 bg-cyan-500/5 text-cyan-400 cursor-wait"
+                            : podStatus[(load as any).db_id] === "success"
+                            ? "border-emerald-500/40 bg-emerald-500/5 text-emerald-400"
+                            : podStatus[(load as any).db_id] === "error"
+                            ? "border-red-500/40 bg-red-500/5 text-red-400"
+                            : "border-slate-700 hover:border-cyan-500/50 hover:bg-cyan-500/5 text-slate-400 hover:text-cyan-400"
+                        }`}
+                      >
+                        {podStatus[(load as any).db_id] === "uploading" ? (
+                          <><Loader2 size={13} className="animate-spin" /> Uploading...</>
+                        ) : podStatus[(load as any).db_id] === "success" ? (
+                          <><FileCheck2 size={13} /> POD Submitted!</>
+                        ) : podStatus[(load as any).db_id] === "error" ? (
+                          <><Upload size={13} /> Upload Failed — Retry
+                          </>
+                        ) : (
+                          <><Upload size={13} /> Choose PDF / Image to Upload</>  
+                        )}
+                      </label>
+                      <input
+                        id={`pod-file-${load.id}`}
+                        type="file"
+                        accept=".pdf,.jpg,.jpeg,.png"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          const dbId = (load as any).db_id;
+                          setPodStatus(prev => ({ ...prev, [dbId]: "uploading" }));
+                          // Store the filename as the pod_url (no storage bucket needed)
+                          const podRef = `${dbId}/${Date.now()}_${file.name}`;
+                          const { error } = await supabase
+                            .from("loads")
+                            .update({ pod_url: podRef })
+                            .eq("id", dbId);
+                          if (error) {
+                            console.error("POD upload error:", error);
+                            setPodStatus(prev => ({ ...prev, [dbId]: "error" }));
+                          } else {
+                            setPodStatus(prev => ({ ...prev, [dbId]: "success" }));
+                            // Refresh loads so the POD row appears
+                            setLoads(prev => prev.map(l =>
+                              (l as any).db_id === dbId ? { ...l, podUrl: podRef } : l
+                            ));
+                          }
+                          // Reset file input
+                          e.target.value = "";
+                        }}
+                      />
                     </div>
                   )}
 
                   {load.podUrl && (
-                    <div className="mt-4 pt-4 border-t border-slate-800/40 flex items-center justify-between text-xs">
-                      <span className="font-semibold text-slate-500">Uploaded POD:</span>
-                      <span className="font-bold text-slate-200">{load.podUrl}</span>
+                    <div className="mt-4 pt-4 border-t border-slate-800/40">
+                      <div className="flex items-center gap-2 text-xs text-emerald-400 font-semibold">
+                        <FileCheck2 size={13} />
+                        <span>POD on file:</span>
+                        <span className="text-slate-300 font-mono truncate max-w-[160px]" title={load.podUrl}>
+                          {load.podUrl.split("/").pop()}
+                        </span>
+                      </div>
                     </div>
                   )}
 
