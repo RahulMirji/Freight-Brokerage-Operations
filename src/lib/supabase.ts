@@ -1,7 +1,31 @@
-import { createBrowserClient } from "@supabase/ssr";
+import { createBrowserClient, createServerClient as createSupabaseServerClient, type CookieOptions } from "@supabase/ssr";
+import type { ReadonlyRequestCookies } from "next/dist/server/web/spec-extension/adapters/request-cookies";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+/**
+ * Server-side Supabase client. Use this in middleware, Server Components,
+ * and Route Handlers. Pass a cookies() adapter from next/headers.
+ */
+export function createServerSupabaseClient(cookieStore: ReadonlyRequestCookies) {
+  return createSupabaseServerClient(supabaseUrl, supabaseAnonKey, {
+    cookies: {
+      getAll() {
+        return cookieStore.getAll();
+      },
+      setAll(cookiesToSet: { name: string; value: string; options: CookieOptions }[]) {
+        try {
+          cookiesToSet.forEach(({ name, value, options }) =>
+            (cookieStore as any).set(name, value, options)
+          );
+        } catch {
+          // setAll called from Server Component — reads are fine, writes silently ignored
+        }
+      },
+    },
+  });
+}
 
 /**
  * Browser-side Supabase client. Use this in all "use client" components.
@@ -114,3 +138,62 @@ export type AuditLog = {
   // Joined
   actor?: Profile;
 };
+
+// ─── Data Mappers ────────────────────────────────────────────────────────────
+
+export function mapDbLoadToUiLoad(dbLoad: any): any {
+  const bids = (dbLoad.bids || []).map((b: any) => ({
+    id: b.id,
+    carrier_id: b.carrier_id,
+    carrierName: b.carrier?.company_name || b.carrier?.full_name || "Unknown Carrier",
+    carrierMc: b.carrier_compliance?.mc_number || "MC-000000",
+    amount: Number(b.amount),
+    rating: 4.8, // Mock default safety rating
+    status: b.status,
+    submittedAt: b.submitted_at
+  }));
+
+  return {
+    id: dbLoad.display_id,
+    db_id: dbLoad.id,
+    shipperName: dbLoad.shipper?.company_name || dbLoad.shipper?.full_name || "Unknown Shipper",
+    carrierName: dbLoad.carrier?.company_name || dbLoad.carrier?.full_name || null,
+    originCity: dbLoad.origin_city,
+    originState: dbLoad.origin_state,
+    destinationCity: dbLoad.destination_city,
+    destinationState: dbLoad.destination_state,
+    pickupDate: dbLoad.pickup_date,
+    deliveryDate: dbLoad.delivery_date,
+    rate: Number(dbLoad.carrier_rate) || 0,
+    margin: Number(dbLoad.broker_margin) || 0,
+    shipperPrice: Number(dbLoad.shipper_price),
+    status: dbLoad.status,
+    weightLbs: dbLoad.weight_lbs,
+    equipmentType: dbLoad.equipment_type,
+    description: dbLoad.description || "",
+    createdAt: dbLoad.created_at?.split("T")[0] || "",
+    bids: bids,
+    carrierSignature: dbLoad.carrier_signature || undefined,
+    signedAt: dbLoad.signed_at || undefined,
+    carrierId: dbLoad.carrier_id || null,
+    complianceOverridden: dbLoad.compliance_overridden || false,
+    podUrl: dbLoad.pod_url || null
+  };
+}
+
+export function mapDbComplianceToUiCompliance(c: any): any {
+  return {
+    id: c.id,
+    carrier_id: c.carrier_id,
+    companyName: c.carrier?.company_name || c.carrier?.full_name || "Unknown Carrier",
+    mcNumber: c.mc_number || "",
+    dotNumber: c.dot_number || "",
+    insuranceStatus: c.insurance_status,
+    insuranceExpiration: c.insurance_expiration || "",
+    cargoLimit: Number(c.cargo_limit) || 0,
+    autoLimit: Number(c.auto_limit) || 0,
+    w9Status: c.w9_status,
+    safetyRating: c.safety_rating || "Satisfactory"
+  };
+}
+

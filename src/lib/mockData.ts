@@ -1,5 +1,6 @@
 export interface Bid {
   id: string;
+  carrier_id?: string;
   carrierName: string;
   carrierMc: string;
   amount: number;
@@ -10,6 +11,7 @@ export interface Bid {
 
 export interface Load {
   id: string;
+  db_id?: string;
   shipperName: string;
   carrierName: string | null;
   originCity: string;
@@ -29,6 +31,9 @@ export interface Load {
   bids: Bid[];
   carrierSignature?: string;
   signedAt?: string;
+  carrierId?: string | null;
+  complianceOverridden?: boolean;
+  podUrl?: string | null;
 }
 
 export interface CarrierCompliance {

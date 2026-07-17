@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import DashboardShell from "@/components/DashboardShell";
-import { getStoredCompliance, saveStoredCompliance } from "@/lib/stateStore";
+import { supabase, mapDbComplianceToUiCompliance } from "@/lib/supabase";
 import { CarrierCompliance } from "@/lib/mockData";
 import { 
   ShieldAlert, 
@@ -25,46 +25,68 @@ import { Input } from "@/components/ui/input";
 export default function BrokerCompliance() {
   const [carriers, setCarriers] = useState<CarrierCompliance[]>([]);
   const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    setCarriers(getStoredCompliance());
+  const fetchComplianceList = async () => {
+    const { data, error } = await supabase
+      .from("carrier_compliance")
+      .select(`
+        *,
+        carrier:profiles(company_name, full_name, email)
+      `);
 
-    const handleStateChange = () => {
-      setCarriers(getStoredCompliance());
-    };
-    window.addEventListener("loadflow_state_change", handleStateChange);
-    return () => window.removeEventListener("loadflow_state_change", handleStateChange);
-  }, []);
-
-  const handleApproveCompliance = (carrierId: string) => {
-    const updated = carriers.map((c) => {
-      if (c.id === carrierId) {
-        return {
-          ...c,
-          insuranceStatus: "compliant" as const,
-          w9Status: "verified" as const,
-          insuranceExpiration: "2027-12-31" // Extend expiration
-        };
-      }
-      return c;
-    });
-    setCarriers(updated);
-    saveStoredCompliance(updated);
+    if (error) {
+      console.error("Error fetching compliance:", error);
+    } else if (data) {
+      setCarriers(data.map(mapDbComplianceToUiCompliance));
+    }
+    setLoading(false);
   };
 
-  const handleRevokeCompliance = (carrierId: string) => {
-    const updated = carriers.map((c) => {
-      if (c.id === carrierId) {
-        return {
-          ...c,
-          insuranceStatus: "non_compliant" as const,
-          w9Status: "missing" as const
-        };
-      }
-      return c;
-    });
-    setCarriers(updated);
-    saveStoredCompliance(updated);
+  useEffect(() => {
+    fetchComplianceList();
+
+    const channel = supabase
+      .channel("broker_compliance_realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "carrier_compliance" }, () => {
+        fetchComplianceList();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  const handleApproveCompliance = async (complianceId: string) => {
+    const { error } = await supabase
+      .from("carrier_compliance")
+      .update({
+        insurance_status: "compliant",
+        w9_status: "verified",
+        insurance_expiration: "2027-12-31"
+      })
+      .eq("id", complianceId);
+
+    if (error) {
+      console.error("Error approving compliance:", error);
+      alert(error.message || "Failed to approve compliance.");
+    }
+  };
+
+  const handleRevokeCompliance = async (complianceId: string) => {
+    const { error } = await supabase
+      .from("carrier_compliance")
+      .update({
+        insurance_status: "non_compliant",
+        w9_status: "missing"
+      })
+      .eq("id", complianceId);
+
+    if (error) {
+      console.error("Error revoking compliance:", error);
+      alert(error.message || "Failed to revoke compliance.");
+    }
   };
 
   const filteredCarriers = carriers.filter((c) => {

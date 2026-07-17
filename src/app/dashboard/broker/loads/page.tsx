@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import DashboardShell from "@/components/DashboardShell";
-import { getStoredLoads, saveStoredLoads } from "@/lib/stateStore";
+import { supabase, mapDbLoadToUiLoad } from "@/lib/supabase";
 import { Load, Bid } from "@/lib/mockData";
 import { 
   Plus, 
@@ -18,7 +18,8 @@ import {
   X,
   PlusCircle,
   FileCheck2,
-  Trash
+  Trash,
+  AlertTriangle
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -43,6 +44,17 @@ export default function BrokerLoads() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [selectedLoad, setSelectedLoad] = useState<Load | null>(null);
 
+  // New state variables
+  const [userProfile, setUserProfile] = useState<any>(null);
+  const [assignedCarrierCompliance, setAssignedCarrierCompliance] = useState<any>(null);
+  const [rateConfirmations, setRateConfirmations] = useState<any[]>([]);
+
+  // Accessorial Form state
+  const [tarpCharge, setTarpCharge] = useState("0");
+  const [detentionCharge, setDetentionCharge] = useState("0");
+  const [layoverCharge, setLayoverCharge] = useState("0");
+  const [isIssuingVersion, setIsIssuingVersion] = useState(false);
+
   // Form states for new load
   const [shipperName, setShipperName] = useState("");
   const [originCity, setOriginCity] = useState("");
@@ -56,49 +68,194 @@ export default function BrokerLoads() {
   const [weight, setWeight] = useState("");
   const [equipmentType, setEquipmentType] = useState<any>("Dry Van");
   const [description, setDescription] = useState("");
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setLoads(getStoredLoads());
+    const fetchLoads = async () => {
+      const { data, error } = await supabase
+        .from("loads")
+        .select(`
+          *,
+          shipper:profiles!loads_shipper_id_fkey(company_name, full_name),
+          carrier:profiles!loads_carrier_id_fkey(company_name, full_name),
+          bids:bids(
+            *,
+            carrier:profiles!bids_carrier_id_fkey(full_name, company_name)
+          )
+        `)
+        .order("created_at", { ascending: false });
 
-    const handleStateChange = () => {
-      setLoads(getStoredLoads());
+      if (error) {
+        console.error("Error fetching loads:", error);
+      } else if (data) {
+        setLoads(data.map(mapDbLoadToUiLoad));
+      }
+      setLoading(false);
     };
-    window.addEventListener("loadflow_state_change", handleStateChange);
-    return () => window.removeEventListener("loadflow_state_change", handleStateChange);
+
+    fetchLoads();
+
+    const channel = supabase
+      .channel("broker_loads_realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "loads" }, () => {
+        fetchLoads();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "bids" }, () => {
+        fetchLoads();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
-  const handleCreateLoad = (e: React.FormEvent) => {
+  useEffect(() => {
+    const fetchProfile = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", user.id)
+        .single();
+      setUserProfile(data);
+    };
+    fetchProfile();
+  }, []);
+
+  useEffect(() => {
+    const fetchCarrierCompliance = async () => {
+      if (!selectedLoad?.carrierId) {
+        setAssignedCarrierCompliance(null);
+        return;
+      }
+      const { data } = await supabase
+        .from("carrier_compliance")
+        .select("*")
+        .eq("carrier_id", selectedLoad.carrierId)
+        .maybeSingle();
+      setAssignedCarrierCompliance(data);
+    };
+
+    const fetchRateConfirmations = async () => {
+      if (!selectedLoad || !(selectedLoad as any).db_id) {
+        setRateConfirmations([]);
+        return;
+      }
+      const { data } = await supabase
+        .from("rate_confirmations")
+        .select("*")
+        .eq("load_id", (selectedLoad as any).db_id)
+        .order("version", { ascending: false });
+      if (data) setRateConfirmations(data);
+    };
+
+    fetchCarrierCompliance();
+    fetchRateConfirmations();
+  }, [selectedLoad]);
+
+  const handleToggleComplianceOverride = async () => {
+    if (!selectedLoad || !(selectedLoad as any).db_id) return;
+    const nextOverride = !selectedLoad.complianceOverridden;
+    const { error } = await supabase
+      .from("loads")
+      .update({ compliance_overridden: nextOverride })
+      .eq("id", (selectedLoad as any).db_id);
+    if (error) {
+      alert("Failed to override compliance block: " + error.message);
+    } else {
+      setSelectedLoad({
+        ...selectedLoad,
+        complianceOverridden: nextOverride
+      });
+    }
+  };
+
+  const handleIssueRateConfirmation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedLoad || !(selectedLoad as any).db_id || !selectedLoad.carrierId) return;
+
+    const tarp = Number(tarpCharge) || 0;
+    const det = Number(detentionCharge) || 0;
+    const lay = Number(layoverCharge) || 0;
+    const accessorialsTotal = tarp + det + lay;
+    const grandTotal = selectedLoad.rate + accessorialsTotal;
+
+    const nextVersion = rateConfirmations.length > 0 ? (rateConfirmations[0].version + 1) : 1;
+
+    const { error } = await supabase
+      .from("rate_confirmations")
+      .insert({
+        load_id: (selectedLoad as any).db_id,
+        carrier_id: selectedLoad.carrierId,
+        version: nextVersion,
+        rate: selectedLoad.rate,
+        tarp_charge: tarp,
+        detention_charge: det,
+        layover_charge: lay,
+        accessorials_total: accessorialsTotal,
+        grand_total: grandTotal,
+        status: "pending_signature"
+      });
+
+    if (error) {
+      alert("Error issuing rate confirmation: " + error.message);
+    } else {
+      setTarpCharge("0");
+      setDetentionCharge("0");
+      setLayoverCharge("0");
+      setIsIssuingVersion(false);
+      const { data } = await supabase
+        .from("rate_confirmations")
+        .select("*")
+        .eq("load_id", (selectedLoad as any).db_id)
+        .order("version", { ascending: false });
+      if (data) setRateConfirmations(data);
+    }
+  };
+
+  const handleCreateLoad = async (e: React.FormEvent) => {
     e.preventDefault();
     
     const carrierRate = Number(rate);
     const brokerMargin = Number(margin);
-    const newLoad: Load = {
-      id: `L-${Math.floor(1000 + Math.random() * 9000)}`,
-      shipperName: shipperName || "Independent Shipper",
-      carrierName: null,
-      originCity,
-      originState: originState.toUpperCase(),
-      destinationCity,
-      destinationState: destinationState.toUpperCase(),
-      pickupDate: pickupDate || new Date().toISOString().split('T')[0],
-      deliveryDate: deliveryDate || new Date().toISOString().split('T')[0],
-      rate: carrierRate,
-      margin: brokerMargin,
-      shipperPrice: carrierRate + brokerMargin,
-      status: "posted",
-      weightLbs: Number(weight) || 40000,
-      equipmentType,
-      description,
-      createdAt: new Date().toISOString().split('T')[0],
-      bids: []
-    };
 
-    const updated = [newLoad, ...loads];
-    setLoads(updated);
-    saveStoredLoads(updated);
+    // Try to find if a shipper company profile matches
+    const { data: shipperProfiles } = await supabase
+      .from("profiles")
+      .select("id")
+      .eq("role", "shipper")
+      .ilike("company_name", shipperName)
+      .limit(1);
+
+    const shipperId = shipperProfiles?.[0]?.id || null;
+
+    const { error } = await supabase.from("loads").insert({
+      shipper_id: shipperId,
+      origin_city: originCity,
+      origin_state: originState.toUpperCase(),
+      destination_city: destinationCity,
+      destination_state: destinationState.toUpperCase(),
+      pickup_date: pickupDate || new Date().toISOString().split('T')[0],
+      delivery_date: deliveryDate || new Date().toISOString().split('T')[0],
+      carrier_rate: carrierRate,
+      broker_margin: brokerMargin,
+      shipper_price: carrierRate + brokerMargin,
+      status: "posted",
+      weight_lbs: Number(weight) || 40000,
+      equipment_type: equipmentType,
+      description: description
+    });
+
+    if (error) {
+      console.error("Error creating load:", error);
+      alert(error.message || "Failed to create load.");
+      return;
+    }
+
     setIsCreateOpen(false);
 
-    // Reset Form
     setShipperName("");
     setOriginCity("");
     setOriginState("");
@@ -113,57 +270,42 @@ export default function BrokerLoads() {
     setDescription("");
   };
 
-  const handleAcceptBid = (loadId: string, bidId: string) => {
-    const updated = loads.map((load) => {
-      if (load.id === loadId) {
-        const winningBid = load.bids.find(b => b.id === bidId);
-        if (winningBid) {
-          // Accept the winning bid, reject the rest
-          const updatedBids = load.bids.map(b => ({
-            ...b,
-            status: b.id === bidId ? ("accepted" as const) : ("rejected" as const)
-          }));
-          return {
-            ...load,
-            status: "booked" as const,
-            carrierName: winningBid.carrierName,
-            rate: winningBid.amount, // Set the agreed carrier rate
-            shipperPrice: winningBid.amount + load.margin, // recalculate price
-            bids: updatedBids
-          };
-        }
-      }
-      return load;
-    });
-    setLoads(updated);
-    saveStoredLoads(updated);
-    if (selectedLoad && selectedLoad.id === loadId) {
-      setSelectedLoad(updated.find(l => l.id === loadId) || null);
+  const handleAcceptBid = async (loadId: string, bidId: string) => {
+    const { error } = await supabase.rpc("accept_carrier_bid", { p_bid_id: bidId });
+
+    if (error) {
+      console.error("Error accepting bid:", error);
+      alert(error.message || "Failed to accept carrier bid.");
     }
   };
 
-  const handleRejectBid = (loadId: string, bidId: string) => {
-    const updated = loads.map((load) => {
-      if (load.id === loadId) {
-        return {
-          ...load,
-          bids: load.bids.map(b => b.id === bidId ? { ...b, status: "rejected" as const } : b)
-        };
-      }
-      return load;
-    });
-    setLoads(updated);
-    saveStoredLoads(updated);
-    if (selectedLoad && selectedLoad.id === loadId) {
-      setSelectedLoad(updated.find(l => l.id === loadId) || null);
+  const handleRejectBid = async (loadId: string, bidId: string) => {
+    const { error } = await supabase
+      .from("bids")
+      .update({ status: "rejected" })
+      .eq("id", bidId);
+
+    if (error) {
+      console.error("Error rejecting bid:", error);
+      alert(error.message || "Failed to reject bid.");
     }
   };
 
-  const handleDeleteLoad = (loadId: string) => {
-    const updated = loads.filter(l => l.id !== loadId);
-    setLoads(updated);
-    saveStoredLoads(updated);
-    setSelectedLoad(null);
+  const handleDeleteLoad = async (loadId: string) => {
+    const load = loads.find(l => l.id === loadId);
+    if (!load || !(load as any).db_id) return;
+
+    const { error } = await supabase
+      .from("loads")
+      .delete()
+      .eq("id", (load as any).db_id);
+
+    if (error) {
+      console.error("Error deleting load:", error);
+      alert(error.message || "Failed to delete load.");
+    } else {
+      setSelectedLoad(null);
+    }
   };
 
   // Filter loads
@@ -173,6 +315,8 @@ export default function BrokerLoads() {
     const matchesStatus = statusFilter === "all" || load.status === statusFilter;
     return matchesSearch && matchesStatus;
   });
+
+  const activeSelectedLoad = selectedLoad ? loads.find(l => l.id === selectedLoad.id) || selectedLoad : null;
 
   return (
     <DashboardShell activeRole="broker">
@@ -402,7 +546,7 @@ export default function BrokerLoads() {
         <div className="lg:col-span-2 space-y-4">
           {filteredLoads.length > 0 ? (
             filteredLoads.map((load) => {
-              const isActive = selectedLoad?.id === load.id;
+              const isActive = activeSelectedLoad?.id === load.id;
               const hasBids = load.bids.length > 0;
               return (
                 <div 
@@ -489,20 +633,20 @@ export default function BrokerLoads() {
 
         {/* Load Details Panel */}
         <div className="space-y-6">
-          {selectedLoad ? (
+          {activeSelectedLoad ? (
             <Card className="bg-slate-900/50 border-slate-800 backdrop-blur-sm sticky top-6">
               <CardHeader className="border-b border-slate-800/80 pb-4 flex flex-row justify-between items-start">
                 <div>
                   <div className="flex items-center gap-2">
-                    <CardTitle className="text-lg font-bold text-white">{selectedLoad.id}</CardTitle>
-                    <Badge variant="outline" className="text-[10px] capitalize">{selectedLoad.status}</Badge>
+                    <CardTitle className="text-lg font-bold text-white">{activeSelectedLoad.id}</CardTitle>
+                    <Badge variant="outline" className="text-[10px] capitalize">{activeSelectedLoad.status}</Badge>
                   </div>
-                  <CardDescription className="text-xs text-slate-400 mt-1">Shipper: {selectedLoad.shipperName}</CardDescription>
+                  <CardDescription className="text-xs text-slate-400 mt-1">Shipper: {activeSelectedLoad.shipperName}</CardDescription>
                 </div>
                 <Button 
                   variant="ghost" 
                   size="icon" 
-                  onClick={() => handleDeleteLoad(selectedLoad.id)}
+                  onClick={() => handleDeleteLoad(activeSelectedLoad.id)}
                   className="h-8 w-8 text-slate-500 hover:text-red-400 hover:bg-red-500/10 cursor-pointer"
                 >
                   <Trash size={16} />
@@ -516,18 +660,18 @@ export default function BrokerLoads() {
                   <div className="grid grid-cols-2 gap-4">
                     <div className="p-3 bg-slate-950/40 border border-slate-800/60 rounded-xl">
                       <p className="text-[10px] text-slate-500">Origin</p>
-                      <p className="text-sm font-bold text-slate-200 mt-1">{selectedLoad.originCity}, {selectedLoad.originState}</p>
+                      <p className="text-sm font-bold text-slate-200 mt-1">{activeSelectedLoad.originCity}, {activeSelectedLoad.originState}</p>
                       <p className="text-[10px] text-slate-400 flex items-center gap-1 mt-1">
                         <Calendar size={10} />
-                        {selectedLoad.pickupDate}
+                        {activeSelectedLoad.pickupDate}
                       </p>
                     </div>
                     <div className="p-3 bg-slate-950/40 border border-slate-800/60 rounded-xl">
                       <p className="text-[10px] text-slate-500">Destination</p>
-                      <p className="text-sm font-bold text-slate-200 mt-1">{selectedLoad.destinationCity}, {selectedLoad.destinationState}</p>
+                      <p className="text-sm font-bold text-slate-200 mt-1">{activeSelectedLoad.destinationCity}, {activeSelectedLoad.destinationState}</p>
                       <p className="text-[10px] text-slate-400 flex items-center gap-1 mt-1">
                         <Calendar size={10} />
-                        {selectedLoad.deliveryDate}
+                        {activeSelectedLoad.deliveryDate}
                       </p>
                     </div>
                   </div>
@@ -538,40 +682,192 @@ export default function BrokerLoads() {
                   <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Cargo Details</h4>
                   <div className="grid grid-cols-2 gap-y-3 text-xs">
                     <div className="text-slate-400">Equipment Type:</div>
-                    <div className="text-slate-200 font-bold text-right">{selectedLoad.equipmentType}</div>
+                    <div className="text-slate-200 font-bold text-right">{activeSelectedLoad.equipmentType}</div>
                     <div className="text-slate-400">Weight:</div>
-                    <div className="text-slate-200 font-bold text-right">{selectedLoad.weightLbs.toLocaleString()} lbs</div>
+                    <div className="text-slate-200 font-bold text-right">{activeSelectedLoad.weightLbs.toLocaleString()} lbs</div>
                     <div className="text-slate-400">Created At:</div>
-                    <div className="text-slate-500 font-medium text-right">{selectedLoad.createdAt}</div>
+                    <div className="text-slate-500 font-medium text-right">{activeSelectedLoad.createdAt}</div>
                   </div>
-                  {selectedLoad.description && (
+                  {activeSelectedLoad.description && (
                     <div className="p-3 bg-slate-950/30 text-xs text-slate-400 rounded-xl italic">
-                      Note: "{selectedLoad.description}"
+                      Note: "{activeSelectedLoad.description}"
                     </div>
                   )}
                 </div>
+
+                {/* Compliance Standing & Override */}
+                {activeSelectedLoad.carrierId && assignedCarrierCompliance && (
+                  <div className="space-y-3.5 border-t border-slate-800/40 pt-4">
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Carrier Compliance</h4>
+                    {assignedCarrierCompliance.insurance_status !== "compliant" || assignedCarrierCompliance.safety_rating === "Unsatisfactory" ? (
+                      <div className="p-3 bg-red-950/15 border border-red-500/10 rounded-xl space-y-2">
+                        <p className="text-xs text-red-400 font-semibold flex items-center gap-1.5">
+                          <AlertTriangle className="h-4 w-4 shrink-0" />
+                          Compliance Lapsed: Progress past Assigned is blocked!
+                        </p>
+                        <p className="text-[10px] text-slate-450">
+                          Insurance: <span className="capitalize font-bold text-red-300">{assignedCarrierCompliance.insurance_status}</span> • Safety Rating: <span className="font-bold text-red-300">{assignedCarrierCompliance.safety_rating}</span>
+                        </p>
+                        
+                        {(userProfile?.permissions?.includes("load.override_compliance_flag") || userProfile?.is_org_admin) && (
+                          <div className="flex items-center gap-2 pt-1 border-t border-red-500/10 mt-1">
+                            <input 
+                              id="compliance-override-checkbox"
+                              type="checkbox"
+                              checked={activeSelectedLoad.complianceOverridden}
+                              onChange={handleToggleComplianceOverride}
+                              className="rounded border-slate-850 bg-slate-950 text-red-500 focus:ring-red-500/20 cursor-pointer"
+                            />
+                            <Label htmlFor="compliance-override-checkbox" className="text-[10px] text-slate-350 font-semibold cursor-pointer select-none">
+                              Apply Compliance Override Flag
+                            </Label>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="p-3 bg-emerald-950/15 border border-emerald-500/10 rounded-xl">
+                        <p className="text-xs text-emerald-400 font-semibold flex items-center gap-1.5">
+                          <Check className="h-4 w-4 shrink-0" />
+                          Carrier Compliance Verified
+                        </p>
+                        <p className="text-[10px] text-slate-400 mt-0.5">
+                          Insurance status is compliant. Safety rating is satisfactory.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Financial Summary */}
                 <div className="space-y-3.5 border-t border-slate-800/40 pt-4">
                   <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Financial Breakdown</h4>
                   <div className="grid grid-cols-2 gap-y-2 text-xs">
                     <div className="text-slate-400">Shipper Pays:</div>
-                    <div className="text-slate-200 font-bold text-right">${selectedLoad.shipperPrice.toLocaleString()}</div>
+                    <div className="text-slate-200 font-bold text-right">${activeSelectedLoad.shipperPrice.toLocaleString()}</div>
                     <div className="text-slate-400">Carrier Paid Rate:</div>
-                    <div className="text-slate-200 font-bold text-right">${selectedLoad.rate.toLocaleString()}</div>
+                    <div className="text-slate-200 font-bold text-right">${activeSelectedLoad.rate.toLocaleString()}</div>
                     <div className="text-slate-400">Broker Margin:</div>
-                    <div className="text-emerald-400 font-bold text-right">${selectedLoad.margin.toLocaleString()}</div>
+                    <div className="text-emerald-400 font-bold text-right">${activeSelectedLoad.margin.toLocaleString()}</div>
                   </div>
                 </div>
 
+                {/* Proof of Delivery (POD) Viewer */}
+                {activeSelectedLoad.podUrl && (
+                  <div className="space-y-3.5 border-t border-slate-800/40 pt-4">
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Proof of Delivery (POD)</h4>
+                    <div className="p-3 bg-slate-950/30 border border-slate-900 rounded-xl flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <FileCheck2 className="text-emerald-400 h-5 w-5" />
+                        <div>
+                          <p className="text-xs font-semibold text-slate-200">{activeSelectedLoad.podUrl}</p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">Uploaded by carrier driver</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Rate Confirmations Versioning & Accessorials */}
+                {activeSelectedLoad.status !== "posted" && activeSelectedLoad.carrierId && (
+                  <div className="space-y-3.5 border-t border-slate-800/40 pt-4">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Digital Contract Versions</h4>
+                      {(userProfile?.permissions?.includes("rate.confirm") || userProfile?.is_org_admin) && (
+                        <Button 
+                          size="xs"
+                          variant="outline"
+                          onClick={() => setIsIssuingVersion(!isIssuingVersion)}
+                          className="text-[10px] font-semibold h-7 border-slate-800 bg-slate-950 hover:bg-slate-900 cursor-pointer px-2"
+                        >
+                          {isIssuingVersion ? "Cancel" : "Add Accessorials / New Version"}
+                        </Button>
+                      )}
+                    </div>
+
+                    {isIssuingVersion && (
+                      <form onSubmit={handleIssueRateConfirmation} className="p-3.5 bg-slate-950/40 border border-slate-800 rounded-xl space-y-3">
+                        <h5 className="text-[10px] font-bold text-white uppercase tracking-wider">Add Accessorial Charges</h5>
+                        <div className="grid grid-cols-3 gap-2">
+                          <div className="space-y-1">
+                            <Label className="text-[10px] text-slate-400">Tarp ($)</Label>
+                            <Input 
+                              type="number" 
+                              value={tarpCharge} 
+                              onChange={(e) => setTarpCharge(e.target.value)}
+                              className="bg-slate-900 border-slate-850 text-xs h-7 px-1.5 focus:ring-emerald-500/20 text-slate-200"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-[10px] text-slate-400">Detention ($)</Label>
+                            <Input 
+                              type="number" 
+                              value={detentionCharge} 
+                              onChange={(e) => setDetentionCharge(e.target.value)}
+                              className="bg-slate-900 border-slate-850 text-xs h-7 px-1.5 focus:ring-emerald-500/20 text-slate-200"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-[10px] text-slate-400">Layover ($)</Label>
+                            <Input 
+                              type="number" 
+                              value={layoverCharge} 
+                              onChange={(e) => setLayoverCharge(e.target.value)}
+                              className="bg-slate-900 border-slate-850 text-xs h-7 px-1.5 focus:ring-emerald-500/20 text-slate-200"
+                            />
+                          </div>
+                        </div>
+                        <Button 
+                          type="submit" 
+                          size="sm"
+                          className="w-full bg-emerald-500 hover:bg-emerald-600 text-black font-semibold text-xs rounded-lg py-1.5 cursor-pointer shadow-lg shadow-emerald-500/10"
+                        >
+                          Publish Rate Version {rateConfirmations.length + 1}
+                        </Button>
+                      </form>
+                    )}
+
+                    <div className="space-y-2">
+                      {rateConfirmations.map((conf) => (
+                        <div key={conf.id} className="p-3 bg-slate-950/30 border border-slate-900 rounded-xl space-y-1.5 text-[11px]">
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-white">Version {conf.version}</span>
+                            <Badge className={`text-[9px] uppercase ${
+                              conf.status === "signed" ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                            }`}>
+                              {conf.status === "signed" ? "Signed" : "Pending Signature"}
+                            </Badge>
+                          </div>
+                          <div className="grid grid-cols-2 gap-y-1 text-slate-450">
+                            <span>Base Rate:</span>
+                            <span className="text-right font-medium text-slate-200">${conf.rate.toLocaleString()}</span>
+                            {conf.accessorials_total > 0 && (
+                              <>
+                                <span>Accessorials:</span>
+                                <span className="text-right font-medium text-amber-400">+${conf.accessorials_total.toLocaleString()}</span>
+                              </>
+                            )}
+                            <span className="font-bold text-slate-350">Grand Total:</span>
+                            <span className="text-right font-bold text-white">${conf.grand_total.toLocaleString()}</span>
+                          </div>
+                          {conf.status === "signed" && (
+                            <p className="text-[9px] text-slate-500 pt-1.5 border-t border-slate-900/60 mt-1 leading-normal">
+                              Signed by: {conf.carrier_signature} at {new Date(conf.signed_at).toLocaleString()}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Bidding Manager */}
                 <div className="space-y-3.5 border-t border-slate-800/40 pt-4">
-                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Incoming Bids ({selectedLoad.bids.length})</h4>
+                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Incoming Bids ({activeSelectedLoad.bids.length})</h4>
                   
-                  {selectedLoad.status === "posted" ? (
-                    selectedLoad.bids.length > 0 ? (
+                  {activeSelectedLoad.status === "posted" ? (
+                    activeSelectedLoad.bids.length > 0 ? (
                       <div className="space-y-3">
-                        {selectedLoad.bids.map((bid) => {
+                        {activeSelectedLoad.bids.map((bid) => {
                           const isDeclined = bid.status === "rejected";
                           return (
                             <div 
@@ -592,14 +888,14 @@ export default function BrokerLoads() {
                                 <div className="flex gap-2">
                                   <Button 
                                     size="icon" 
-                                    onClick={() => handleRejectBid(selectedLoad.id, bid.id)}
+                                    onClick={() => handleRejectBid(activeSelectedLoad.id, bid.id)}
                                     className="h-8 w-8 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 rounded-lg cursor-pointer"
                                   >
                                     <X size={14} />
                                   </Button>
                                   <Button 
                                     size="icon"
-                                    onClick={() => handleAcceptBid(selectedLoad.id, bid.id)}
+                                    onClick={() => handleAcceptBid(activeSelectedLoad.id, bid.id)}
                                     className="h-8 w-8 bg-emerald-500 hover:bg-emerald-600 text-black font-semibold rounded-lg cursor-pointer"
                                   >
                                     <Check size={14} strokeWidth={3} />
@@ -621,7 +917,7 @@ export default function BrokerLoads() {
                       <FileCheck2 size={16} />
                       <div>
                         <p className="font-bold">Booked Carrier</p>
-                        <p className="text-[10px] text-slate-400 mt-0.5">{selectedLoad.carrierName || "Pending allocation"}</p>
+                        <p className="text-[10px] text-slate-400 mt-0.5">{activeSelectedLoad.carrierName || "Pending allocation"}</p>
                       </div>
                     </div>
                   )}

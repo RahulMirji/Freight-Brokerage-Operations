@@ -12,8 +12,10 @@ import {
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import Link from "next/link";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import DashboardShell from "@/components/DashboardShell";
-import { getStoredLoads, saveStoredLoads, getStoredCompliance } from "@/lib/stateStore";
+import WrongPortalBannerWrapper from "@/components/WrongPortalBanner";
+import { supabase, mapDbLoadToUiLoad, mapDbComplianceToUiCompliance } from "@/lib/supabase";
 import { Load, CarrierCompliance } from "@/lib/mockData";
 import { 
   Truck, 
@@ -37,27 +39,156 @@ export default function CarrierOverview() {
   const [signingLoad, setSigningLoad] = useState<Load | null>(null);
   const [signatureName, setSignatureName] = useState("");
   const [agreeTerms, setAgreeTerms] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [latestRateConfirmation, setLatestRateConfirmation] = useState<any>(null);
 
-  // For this mock carrier demo, we assume the logged-in carrier is "Apex Trucking Inc."
-  const CARRIER_NAME = "Apex Trucking Inc.";
+  // New tab state
+  const [activeTab, setActiveTab] = useState<"overview" | "staff">("overview");
+  const [userProfile, setUserProfile] = useState<any>(null);
+  const [staffList, setStaffList] = useState<any[]>([]);
+  const [rolesList, setRolesList] = useState<any[]>([]);
+  
+  // Custom Role Form state
+  const [roleName, setRoleName] = useState("");
+  const [selectedPermissions, setSelectedPermissions] = useState<string[]>([]);
+  const [inviteLink, setInviteLink] = useState("");
+
+  const PERMISSIONS_CATALOG = [
+    { key: "load.update_status", label: "Update Dispatch Status" },
+    { key: "pod.upload", label: "Upload Proof of Delivery" },
+    { key: "rate.confirm", label: "Sign Rate Confirmations" },
+    { key: "staff.manage", label: "Manage Organization Staff" },
+  ];
 
   useEffect(() => {
-    setLoads(getStoredLoads());
-    const compList = getStoredCompliance();
-    const myComp = compList.find(c => c.companyName === CARRIER_NAME) || null;
-    setCompliance(myComp);
-
-    const handleStateChange = () => {
-      setLoads(getStoredLoads());
-      const list = getStoredCompliance();
-      setCompliance(list.find(c => c.companyName === CARRIER_NAME) || null);
+    const fetchProfile = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      
+      const { data } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", user.id)
+        .single();
+      setUserProfile(data);
     };
-    window.addEventListener("loadflow_state_change", handleStateChange);
-    return () => window.removeEventListener("loadflow_state_change", handleStateChange);
+    fetchProfile();
   }, []);
 
-  // Filter loads assigned to this carrier
-  const myLoads = loads.filter(l => l.carrierName === CARRIER_NAME);
+  const fetchStaffAndRoles = async () => {
+    if (!userProfile?.org_id) return;
+
+    // 1. Fetch Staff profiles
+    const { data: staff } = await supabase
+      .from("profiles")
+      .select(`
+        *,
+        role_ref:roles(name)
+      `)
+      .eq("org_id", userProfile.org_id);
+    if (staff) setStaffList(staff);
+
+    // 2. Fetch Roles
+    const { data: roles } = await supabase
+      .from("roles")
+      .select("*")
+      .eq("org_id", userProfile.org_id);
+    if (roles) setRolesList(roles);
+  };
+
+  useEffect(() => {
+    fetchStaffAndRoles();
+  }, [userProfile]);
+
+  const handleCreateRole = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!roleName || !userProfile?.org_id) return;
+
+    const { error } = await supabase
+      .from("roles")
+      .insert({
+        org_id: userProfile.org_id,
+        name: roleName,
+        permissions: selectedPermissions
+      });
+
+    if (error) {
+      console.error("Error creating role:", error);
+      alert(error.message || "Failed to create role.");
+    } else {
+      setRoleName("");
+      setSelectedPermissions([]);
+      fetchStaffAndRoles();
+    }
+  };
+
+  const handleGenerateInvite = (roleId: string | null) => {
+    if (!roleId || !userProfile?.org_id) return;
+    const link = `${window.location.origin}/signup?org_id=${userProfile.org_id}&role_id=${roleId}`;
+    setInviteLink(link);
+  };
+
+  useEffect(() => {
+    let channel: any;
+
+    const fetchCarrierData = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      // 1. Fetch compliance standing
+      const { data: compData } = await supabase
+        .from("carrier_compliance")
+        .select(`
+          *,
+          carrier:profiles(company_name, full_name)
+        `)
+        .eq("carrier_id", user.id)
+        .maybeSingle();
+
+      if (compData) {
+        setCompliance(mapDbComplianceToUiCompliance(compData));
+      }
+
+      // 2. Fetch assigned loads
+      const { data: loadsData } = await supabase
+        .from("loads")
+        .select(`
+          *,
+          shipper:profiles!loads_shipper_id_fkey(company_name),
+          carrier:profiles!loads_carrier_id_fkey(company_name),
+          bids:bids(
+            *,
+            carrier:profiles!bids_carrier_id_fkey(full_name, company_name)
+          )
+        `)
+        .eq("carrier_id", user.id)
+        .order("created_at", { ascending: false });
+
+      if (loadsData) {
+        setLoads(loadsData.map(mapDbLoadToUiLoad));
+      }
+      setLoading(false);
+    };
+
+    fetchCarrierData();
+
+    channel = supabase
+      .channel("carrier_realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "loads" }, () => {
+        fetchCarrierData();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "carrier_compliance" }, () => {
+        fetchCarrierData();
+      })
+      .subscribe();
+
+    return () => {
+      if (channel) supabase.removeChannel(channel);
+    };
+  }, []);
+
+  // Filter loads assigned to this carrier (already filtered on fetch, but keep variable name)
+  const myLoads = loads;
   
   // Metrics
   const activeRuns = myLoads.filter(l => ["booked", "in_transit", "delivered"].includes(l.status));
@@ -66,41 +197,76 @@ export default function CarrierOverview() {
     .reduce((acc, curr) => acc + curr.rate, 0);
 
   // Status transitions
-  const handleTransitionStatus = (loadId: string, currentStatus: string) => {
+  const handleTransitionStatus = async (loadId: string, currentStatus: string) => {
+    const load = loads.find(l => l.id === loadId);
+    if (!load || !(load as any).db_id) return;
+
     let nextStatus: Load["status"] = "booked";
     if (currentStatus === "booked") nextStatus = "in_transit";
     else if (currentStatus === "in_transit") nextStatus = "delivered";
     else if (currentStatus === "delivered") nextStatus = "completed";
 
-    const updated = loads.map(l => {
-      if (l.id === loadId) {
-        return { ...l, status: nextStatus };
-      }
-      return l;
-    });
+    const { error } = await supabase
+      .from("loads")
+      .update({ status: nextStatus })
+      .eq("id", (load as any).db_id);
 
-    setLoads(updated);
-    saveStoredLoads(updated);
+    if (error) {
+      console.error("Error updating status:", error);
+    }
   };
 
-  const handleSignContract = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!signingLoad) return;
-
-    const updated = loads.map(l => {
-      if (l.id === signingLoad.id) {
-        return {
-          ...l,
-          carrierSignature: signatureName,
-          signedAt: new Date().toISOString()
-        };
+  useEffect(() => {
+    const fetchLatestRateConf = async () => {
+      if (!signingLoad || !(signingLoad as any).db_id) {
+        setLatestRateConfirmation(null);
+        return;
       }
-      return l;
-    });
+      const { data } = await supabase
+        .from("rate_confirmations")
+        .select("*")
+        .eq("load_id", (signingLoad as any).db_id)
+        .order("version", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (data) {
+        setLatestRateConfirmation(data);
+      }
+    };
+    fetchLatestRateConf();
+  }, [signingLoad]);
 
-    setLoads(updated);
-    saveStoredLoads(updated);
-    setSigningLoad(null);
+  const handleSignContract = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!signingLoad || !(signingLoad as any).db_id) return;
+
+    if (latestRateConfirmation) {
+      const { error: confError } = await supabase
+        .from("rate_confirmations")
+        .update({
+          status: "signed",
+          carrier_signature: signatureName,
+          signed_at: new Date().toISOString()
+        })
+        .eq("id", latestRateConfirmation.id);
+      if (confError) {
+        console.error("Error signing rate confirmation row:", confError);
+      }
+    }
+
+    const { error } = await supabase
+      .from("loads")
+      .update({
+        carrier_signature: signatureName,
+        signed_at: new Date().toISOString()
+      })
+      .eq("id", (signingLoad as any).db_id);
+
+    if (error) {
+      console.error("Error signing rate confirmation:", error);
+    } else {
+      setSigningLoad(null);
+    }
   };
 
   const getStatusButton = (load: Load) => {
@@ -154,6 +320,8 @@ export default function CarrierOverview() {
   return (
     <DashboardShell activeRole="carrier">
       
+      <WrongPortalBannerWrapper />
+
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
         <div>
@@ -298,6 +466,50 @@ export default function CarrierOverview() {
                     </div>
                   </div>
 
+                  {/* POD Uploader */}
+                  {load.status !== "booked" && !load.podUrl && (
+                    <div className="space-y-2 mt-4 pt-4 border-t border-slate-800/40">
+                      <Label className="text-[10px] text-slate-500 uppercase font-bold">Proof of Delivery (POD) Uploader</Label>
+                      <div className="flex gap-2">
+                        <Input 
+                          id={`pod-input-${load.id}`}
+                          placeholder="e.g. POD-signed-bill.pdf" 
+                          className="bg-slate-950 border-slate-850 text-xs h-8 focus-visible:ring-cyan-500/20 text-slate-300"
+                        />
+                        <Button 
+                          size="sm"
+                          onClick={async () => {
+                            const el = document.getElementById(`pod-input-${load.id}`) as HTMLInputElement;
+                            const val = el?.value?.trim();
+                            if (!val) {
+                              alert("Please enter a valid document name.");
+                              return;
+                            }
+                            const { error } = await supabase
+                              .from("loads")
+                              .update({ pod_url: val })
+                              .eq("id", (load as any).db_id);
+                            if (error) {
+                              alert(error.message);
+                            } else {
+                              alert("POD uploaded successfully!");
+                            }
+                          }}
+                          className="bg-cyan-500 hover:bg-cyan-600 text-black font-semibold text-xs px-3 h-8 cursor-pointer"
+                        >
+                          Upload
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {load.podUrl && (
+                    <div className="mt-4 pt-4 border-t border-slate-800/40 flex items-center justify-between text-xs">
+                      <span className="font-semibold text-slate-500">Uploaded POD:</span>
+                      <span className="font-bold text-slate-200">{load.podUrl}</span>
+                    </div>
+                  )}
+
                 </div>
 
               </div>
@@ -325,79 +537,128 @@ export default function CarrierOverview() {
         </Card>
       )}
 
-    {/* Digital Rate Confirmation Signature Dialog */}
-    <Dialog open={!!signingLoad} onOpenChange={(open) => !open && setSigningLoad(null)}>
-      <DialogContent className="sm:max-w-[600px] bg-slate-900 border-slate-800 text-slate-100 max-h-[90vh] overflow-y-auto">
-        <DialogHeader className="border-b border-slate-800/80 pb-4">
-          <DialogTitle className="text-xl font-bold text-white flex items-center gap-2">
-            <FileCheck className="text-amber-400 h-5 w-5" />
-            Digital Rate Confirmation Contract
-          </DialogTitle>
-          <DialogDescription className="text-slate-400 text-xs">
-            Load ID: {signingLoad?.id} • Route: {signingLoad?.originCity}, {signingLoad?.originState} ➔ {signingLoad?.destinationCity}, {signingLoad?.destinationState}
-          </DialogDescription>
-        </DialogHeader>
 
-        <div className="py-4 space-y-4 text-xs text-slate-300">
-          {/* Agreement Terms Box */}
-          <div className="p-4 rounded-xl border border-slate-800 bg-slate-950/60 leading-relaxed space-y-3 font-mono">
-            <p className="font-bold text-slate-200 border-b border-slate-900 pb-2 text-center uppercase tracking-wider text-[10px]">Contract Agreement terms</p>
-            <p>1. The carrier agrees to transport the cargo consisting of <strong className="text-white">{signingLoad?.weightLbs.toLocaleString()} lbs</strong> using a <strong className="text-white">{signingLoad?.equipmentType}</strong> trailer.</p>
-            <p>2. Payment for this shipment is set at a flat rate of <strong className="text-emerald-400">${signingLoad?.rate.toLocaleString()} USD</strong>, payable within 30 days of proof-of-delivery (POD) verification.</p>
-            <p>3. Carrier certifies all DOT/MC registration, active compliance certifications, and insurance policies are active and up to date.</p>
-            <p>4. Falsifying signatures or breach of shipping schedules will result in compliance audits and possible authority holds.</p>
+      {/* Signing rate confirmation Modal */}
+      <Dialog open={!!signingLoad} onOpenChange={(open) => !open && setSigningLoad(null)}>
+        <DialogContent className="sm:max-w-[550px] bg-slate-900 border-slate-800 text-slate-100 max-h-[90vh] overflow-y-auto">
+          <DialogHeader className="border-b border-slate-850 pb-4">
+            <DialogTitle className="text-lg font-bold text-white flex items-center gap-1.5">
+              <FileCheck className="text-amber-500" /> Digital Rate Confirmation Confirmation
+            </DialogTitle>
+            <DialogDescription className="text-slate-400 text-xs mt-1">
+              Verify freight details and digitally sign to dispatch driver for Load {signingLoad?.id}.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="py-4 space-y-4 text-xs leading-relaxed text-slate-300">
+            {/* Cargo Details Summary */}
+            <div className="bg-slate-950/50 border border-slate-850 p-4 rounded-xl space-y-2">
+              <h4 className="font-bold text-white uppercase text-[10px] tracking-wider mb-2">
+                Freight Dispatch Summary {latestRateConfirmation && `(Version ${latestRateConfirmation.version})`}
+              </h4>
+              <div className="grid grid-cols-2 gap-y-2">
+                <span className="text-slate-500">Route:</span>
+                <span className="text-slate-350 font-semibold text-right">{signingLoad?.originCity}, {signingLoad?.originState} ➔ {signingLoad?.destinationCity}, {signingLoad?.destinationState}</span>
+                
+                <span className="text-slate-500">Equipment Type:</span>
+                <span className="text-slate-350 font-semibold text-right">{signingLoad?.equipmentType}</span>
+
+                <span className="text-slate-500">Weight:</span>
+                <span className="text-slate-350 font-semibold text-right">{signingLoad?.weightLbs.toLocaleString()} lbs</span>
+
+                {latestRateConfirmation ? (
+                  <>
+                    <span className="text-slate-500">Base Carrier Rate:</span>
+                    <span className="text-slate-350 font-semibold text-right">${latestRateConfirmation.rate.toLocaleString()}</span>
+                    {latestRateConfirmation.tarp_charge > 0 && (
+                      <>
+                        <span className="text-slate-500">Tarp Charge:</span>
+                        <span className="text-slate-350 font-semibold text-right">+${latestRateConfirmation.tarp_charge.toLocaleString()}</span>
+                      </>
+                    )}
+                    {latestRateConfirmation.detention_charge > 0 && (
+                      <>
+                        <span className="text-slate-500">Detention Charge:</span>
+                        <span className="text-slate-350 font-semibold text-right">+${latestRateConfirmation.detention_charge.toLocaleString()}</span>
+                      </>
+                    )}
+                    {latestRateConfirmation.layover_charge > 0 && (
+                      <>
+                        <span className="text-slate-500">Layover Charge:</span>
+                        <span className="text-slate-350 font-semibold text-right">+${latestRateConfirmation.layover_charge.toLocaleString()}</span>
+                      </>
+                    )}
+                    <span className="text-slate-500 font-bold">Grand Total Confirmed Payout:</span>
+                    <span className="text-emerald-400 font-extrabold text-right text-sm">${latestRateConfirmation.grand_total.toLocaleString()}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-slate-500">Confirmed Rate Payout:</span>
+                    <span className="text-emerald-400 font-extrabold text-right">${signingLoad?.rate.toLocaleString()}</span>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Legal binding terms */}
+            <h4 className="font-bold text-white uppercase text-[10px] tracking-wider pt-2">Contract Binding Clauses</h4>
+            <div className="space-y-2 bg-slate-950/20 border border-slate-850/60 p-3 rounded-xl max-h-[140px] overflow-y-auto text-slate-400 leading-normal">
+              <p>1. By signing this confirmation, Carrier agrees to pick up and deliver the listed freight at specified schedules.</p>
+              <p>2. Payment margin will be paid within 30 days post POD (Proof of Delivery) upload and verification checks.</p>
+              <p>3. Carrier certifies all DOT/MC registration, active compliance certifications, and insurance policies are active and up to date.</p>
+              <p>4. Falsifying signatures or breach of shipping schedules will result in compliance audits and possible authority holds.</p>
+            </div>
+
+            {/* Signature form */}
+            <form onSubmit={handleSignContract} className="space-y-4">
+              
+              <div className="space-y-1.5">
+                <Label htmlFor="sig-name">Authorized Signatory Name</Label>
+                <Input 
+                  id="sig-name" 
+                  placeholder="e.g. John Doe, Dispatch Manager" 
+                  value={signatureName}
+                  onChange={(e) => setSignatureName(e.target.value)}
+                  className="bg-slate-950 border-slate-800 focus-visible:ring-amber-500/20 text-sm font-semibold"
+                  required
+                />
+              </div>
+
+              <div className="flex items-start gap-2 pt-2">
+                <input 
+                  id="agree-checkbox" 
+                  type="checkbox"
+                  checked={agreeTerms}
+                  onChange={(e) => setAgreeTerms(e.target.checked)}
+                  className="mt-0.5 rounded border-slate-800 bg-slate-950 text-amber-500 focus:ring-amber-500/20 cursor-pointer"
+                  required
+                />
+                <Label htmlFor="agree-checkbox" className="text-slate-400 select-none cursor-pointer leading-normal">
+                  I certify that I am authorized to bind {compliance?.companyName || "the carrier"} to this rate confirmation and agree to all terms of this digital contract.
+                </Label>
+              </div>
+
+              <DialogFooter className="pt-4 border-t border-slate-800 mt-6">
+                <Button 
+                  type="button" 
+                  variant="ghost" 
+                  onClick={() => setSigningLoad(null)}
+                  className="hover:bg-slate-800 text-slate-400"
+                >
+                  Cancel
+                </Button>
+                <Button 
+                  type="submit" 
+                  disabled={!agreeTerms || !signatureName}
+                  className="bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-black font-semibold rounded-xl"
+                >
+                  Submit Digital Signature
+                </Button>
+              </DialogFooter>
+            </form>
           </div>
-
-          {/* Signature form */}
-          <form onSubmit={handleSignContract} className="space-y-4">
-            
-            <div className="space-y-1.5">
-              <Label htmlFor="sig-name">Authorized Signatory Name</Label>
-              <Input 
-                id="sig-name" 
-                placeholder="e.g. John Doe, Dispatch Manager" 
-                value={signatureName}
-                onChange={(e) => setSignatureName(e.target.value)}
-                className="bg-slate-950 border-slate-800 focus-visible:ring-amber-500/20 text-sm font-semibold"
-                required
-              />
-            </div>
-
-            <div className="flex items-start gap-2 pt-2">
-              <input 
-                id="agree-checkbox" 
-                type="checkbox"
-                checked={agreeTerms}
-                onChange={(e) => setAgreeTerms(e.target.checked)}
-                className="mt-0.5 rounded border-slate-800 bg-slate-950 text-amber-500 focus:ring-amber-500/20 cursor-pointer"
-                required
-              />
-              <Label htmlFor="agree-checkbox" className="text-slate-400 select-none cursor-pointer leading-normal">
-                I certify that I am authorized to bind {CARRIER_NAME} to this rate confirmation and agree to all terms of this digital contract.
-              </Label>
-            </div>
-
-            <DialogFooter className="pt-4 border-t border-slate-800 mt-6">
-              <Button 
-                type="button" 
-                variant="ghost" 
-                onClick={() => setSigningLoad(null)}
-                className="hover:bg-slate-800 text-slate-400"
-              >
-                Cancel
-              </Button>
-              <Button 
-                type="submit" 
-                disabled={!agreeTerms || !signatureName}
-                className="bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-black font-semibold rounded-xl"
-              >
-                Submit Digital Signature
-              </Button>
-            </DialogFooter>
-          </form>
-        </div>
-      </DialogContent>
-    </Dialog>
-  </DashboardShell>
+        </DialogContent>
+      </Dialog>
+    </DashboardShell>
   );
 }

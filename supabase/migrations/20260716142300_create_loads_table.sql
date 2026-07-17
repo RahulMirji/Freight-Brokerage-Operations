@@ -16,11 +16,15 @@ BEGIN
 END;
 $$;
 
+-- ─── Sequence for generating display IDs (L-9100, L-9101, ...) ───────────────
+
+CREATE SEQUENCE public.load_display_id_seq START WITH 9100;
+
 -- ─── Table ────────────────────────────────────────────────────────────────────
 
 CREATE TABLE public.loads (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  display_id        text UNIQUE NOT NULL,           -- human-readable ID (e.g. "L-9081")
+  display_id        text UNIQUE NOT NULL DEFAULT ('L-' || nextval('public.load_display_id_seq')::text),
   shipper_id        uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
   carrier_id        uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
   origin_city       text NOT NULL,
@@ -55,9 +59,7 @@ COMMENT ON COLUMN public.loads.display_id   IS 'Human-readable load ID shown in 
 COMMENT ON COLUMN public.loads.broker_margin IS 'shipper_price - carrier_rate. Calculated when broker accepts a carrier bid.';
 COMMENT ON COLUMN public.loads.carrier_signature IS 'Full name of the carrier signatory on the rate confirmation contract.';
 
--- ─── Sequence for generating display IDs (L-9100, L-9101, ...) ───────────────
 
-CREATE SEQUENCE public.load_display_id_seq START WITH 9100;
 
 -- ─── Trigger: auto-update updated_at ─────────────────────────────────────────
 
