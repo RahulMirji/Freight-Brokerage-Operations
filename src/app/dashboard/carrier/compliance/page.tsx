@@ -24,6 +24,7 @@ import { Badge } from "@/components/ui/badge";
 export default function CarrierCompliancePage() {
   const [myCompliance, setMyCompliance] = useState<CarrierCompliance | null>(null);
   const [loading, setLoading] = useState(true);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Form states for document renewal
   const [cargoLimit, setCargoLimit] = useState("");
@@ -90,6 +91,7 @@ export default function CarrierCompliancePage() {
 
     const isCompliant = isExpiryValid && isAutoValid && isCargoValid && w9Uploaded;
 
+    setSaveError(null);
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
@@ -100,23 +102,38 @@ export default function CarrierCompliancePage() {
         auto_limit: autoVal,
         insurance_expiration: expiryDate,
         insurance_status: isCompliant ? "compliant" : "non_compliant",
-        w9_status: w9Uploaded ? "verified" : "missing"
+        w9_status: w9Uploaded ? "verified" : "pending_review"
       })
       .eq("carrier_id", user.id);
 
     if (error) {
       console.error("Error updating compliance:", error);
-      alert(error.message || "Failed to update compliance credentials.");
+      setSaveError(error.message || "Failed to update compliance credentials.");
     } else {
       setUploadSuccess(true);
       setTimeout(() => setUploadSuccess(false), 3000);
     }
   };
 
+  if (loading) {
+    return (
+      <DashboardShell activeRole="carrier">
+        <p className="text-slate-400 text-sm">Loading compliance credentials...</p>
+      </DashboardShell>
+    );
+  }
+
   if (!myCompliance) {
     return (
       <DashboardShell activeRole="carrier">
-        <p>Loading compliance credentials...</p>
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <ShieldAlert className="h-12 w-12 text-slate-600 mb-4" />
+          <h2 className="text-lg font-bold text-white mb-1">No Compliance Record Found</h2>
+          <p className="text-slate-400 text-sm max-w-sm">
+            Your compliance profile hasn&apos;t been created yet. This usually happens automatically on signup.
+            Please contact your broker administrator.
+          </p>
+        </div>
       </DashboardShell>
     );
   }
@@ -312,9 +329,15 @@ export default function CarrierCompliancePage() {
                   )}
                 </div>
 
+                {saveError && (
+                  <div className="p-3 rounded-xl bg-red-950/15 border border-red-500/20 text-red-400 text-xs font-semibold">
+                    ⚠ {saveError}
+                  </div>
+                )}
+
                 {uploadSuccess && (
                   <div className="p-3 rounded-xl bg-emerald-950/15 border border-emerald-500/10 text-emerald-400 text-xs font-semibold text-center animate-fade-in">
-                    Credentials updated successfully!
+                    ✓ Credentials updated successfully!
                   </div>
                 )}
 
