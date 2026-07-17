@@ -1,5 +1,6 @@
 export interface Bid {
   id: string;
+  carrier_id?: string;
   carrierName: string;
   carrierMc: string;
   amount: number;
@@ -10,6 +11,7 @@ export interface Bid {
 
 export interface Load {
   id: string;
+  db_id?: string;
   shipperName: string;
   carrierName: string | null;
   originCity: string;

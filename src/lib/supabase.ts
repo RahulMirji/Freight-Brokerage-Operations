@@ -144,6 +144,7 @@ export type AuditLog = {
 export function mapDbLoadToUiLoad(dbLoad: any): any {
   const bids = (dbLoad.bids || []).map((b: any) => ({
     id: b.id,
+    carrier_id: b.carrier_id,
     carrierName: b.carrier?.company_name || b.carrier?.full_name || "Unknown Carrier",
     carrierMc: b.carrier_compliance?.mc_number || "MC-000000",
     amount: Number(b.amount),

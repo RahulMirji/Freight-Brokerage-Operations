@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import DashboardShell from "@/components/DashboardShell";
-import { getStoredCompliance, saveStoredCompliance } from "@/lib/stateStore";
+import { supabase, mapDbComplianceToUiCompliance } from "@/lib/supabase";
 import { CarrierCompliance } from "@/lib/mockData";
 import { 
   ShieldCheck, 
@@ -22,10 +22,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 
 export default function CarrierCompliancePage() {
-  const [complianceList, setComplianceList] = useState<CarrierCompliance[]>([]);
   const [myCompliance, setMyCompliance] = useState<CarrierCompliance | null>(null);
-
-  const CARRIER_NAME = "Apex Trucking Inc.";
+  const [loading, setLoading] = useState(true);
 
   // Form states for document renewal
   const [cargoLimit, setCargoLimit] = useState("");
@@ -35,28 +33,47 @@ export default function CarrierCompliancePage() {
   const [uploadSuccess, setUploadSuccess] = useState(false);
 
   useEffect(() => {
-    const list = getStoredCompliance();
-    setComplianceList(list);
-    const myComp = list.find(c => c.companyName === CARRIER_NAME) || null;
-    setMyCompliance(myComp);
-    
-    if (myComp) {
-      setCargoLimit(myComp.cargoLimit.toString());
-      setAutoLimit(myComp.autoLimit.toString());
-      setExpiryDate(myComp.insuranceExpiration);
-      setW9Uploaded(myComp.w9Status === "verified");
-    }
+    const fetchCompliance = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-    const handleStateChange = () => {
-      const updatedList = getStoredCompliance();
-      setComplianceList(updatedList);
-      setMyCompliance(updatedList.find(c => c.companyName === CARRIER_NAME) || null);
+      const { data, error } = await supabase
+        .from("carrier_compliance")
+        .select(`
+          *,
+          carrier:profiles(company_name, full_name)
+        `)
+        .eq("carrier_id", user.id)
+        .maybeSingle();
+
+      if (error) {
+        console.error("Error fetching compliance:", error);
+      } else if (data) {
+        const mapped = mapDbComplianceToUiCompliance(data);
+        setMyCompliance(mapped);
+        setCargoLimit(mapped.cargoLimit.toString());
+        setAutoLimit(mapped.autoLimit.toString());
+        setExpiryDate(mapped.insuranceExpiration);
+        setW9Uploaded(mapped.w9Status === "verified");
+      }
+      setLoading(false);
     };
-    window.addEventListener("loadflow_state_change", handleStateChange);
-    return () => window.removeEventListener("loadflow_state_change", handleStateChange);
+
+    fetchCompliance();
+
+    const channel = supabase
+      .channel("carrier_compliance_realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "carrier_compliance" }, () => {
+        fetchCompliance();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
-  const handleUpdateCredentials = (e: React.FormEvent) => {
+  const handleUpdateCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!myCompliance) return;
 
@@ -73,22 +90,27 @@ export default function CarrierCompliancePage() {
 
     const isCompliant = isExpiryValid && isAutoValid && isCargoValid && w9Uploaded;
 
-    const updatedCompliance: CarrierCompliance = {
-      ...myCompliance,
-      cargoLimit: cargoVal,
-      autoLimit: autoVal,
-      insuranceExpiration: expiryDate,
-      insuranceStatus: isCompliant ? "compliant" : "non_compliant",
-      w9Status: w9Uploaded ? "verified" : "missing"
-    };
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
 
-    const updatedList = complianceList.map(c => c.id === myCompliance.id ? updatedCompliance : c);
-    setComplianceList(updatedList);
-    saveStoredCompliance(updatedList);
-    setMyCompliance(updatedCompliance);
-    
-    setUploadSuccess(true);
-    setTimeout(() => setUploadSuccess(false), 3000);
+    const { error } = await supabase
+      .from("carrier_compliance")
+      .update({
+        cargo_limit: cargoVal,
+        auto_limit: autoVal,
+        insurance_expiration: expiryDate,
+        insurance_status: isCompliant ? "compliant" : "non_compliant",
+        w9_status: w9Uploaded ? "verified" : "missing"
+      })
+      .eq("carrier_id", user.id);
+
+    if (error) {
+      console.error("Error updating compliance:", error);
+      alert(error.message || "Failed to update compliance credentials.");
+    } else {
+      setUploadSuccess(true);
+      setTimeout(() => setUploadSuccess(false), 3000);
+    }
   };
 
   if (!myCompliance) {

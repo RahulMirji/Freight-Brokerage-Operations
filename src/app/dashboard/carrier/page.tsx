@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import Link from "next/link";
 import DashboardShell from "@/components/DashboardShell";
 import WrongPortalBannerWrapper from "@/components/WrongPortalBanner";
-import { getStoredLoads, saveStoredLoads, getStoredCompliance } from "@/lib/stateStore";
+import { supabase, mapDbLoadToUiLoad, mapDbComplianceToUiCompliance } from "@/lib/supabase";
 import { Load, CarrierCompliance } from "@/lib/mockData";
 import { 
   Truck, 
@@ -38,27 +38,69 @@ export default function CarrierOverview() {
   const [signingLoad, setSigningLoad] = useState<Load | null>(null);
   const [signatureName, setSignatureName] = useState("");
   const [agreeTerms, setAgreeTerms] = useState(false);
-
-  // For this mock carrier demo, we assume the logged-in carrier is "Apex Trucking Inc."
-  const CARRIER_NAME = "Apex Trucking Inc.";
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setLoads(getStoredLoads());
-    const compList = getStoredCompliance();
-    const myComp = compList.find(c => c.companyName === CARRIER_NAME) || null;
-    setCompliance(myComp);
+    let channel: any;
 
-    const handleStateChange = () => {
-      setLoads(getStoredLoads());
-      const list = getStoredCompliance();
-      setCompliance(list.find(c => c.companyName === CARRIER_NAME) || null);
+    const fetchCarrierData = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      // 1. Fetch compliance standing
+      const { data: compData } = await supabase
+        .from("carrier_compliance")
+        .select(`
+          *,
+          carrier:profiles(company_name, full_name)
+        `)
+        .eq("carrier_id", user.id)
+        .maybeSingle();
+
+      if (compData) {
+        setCompliance(mapDbComplianceToUiCompliance(compData));
+      }
+
+      // 2. Fetch assigned loads
+      const { data: loadsData } = await supabase
+        .from("loads")
+        .select(`
+          *,
+          shipper:profiles!loads_shipper_id_fkey(company_name),
+          carrier:profiles!loads_carrier_id_fkey(company_name),
+          bids:bids(
+            *,
+            carrier:profiles!bids_carrier_id_fkey(full_name, company_name)
+          )
+        `)
+        .eq("carrier_id", user.id)
+        .order("created_at", { ascending: false });
+
+      if (loadsData) {
+        setLoads(loadsData.map(mapDbLoadToUiLoad));
+      }
+      setLoading(false);
     };
-    window.addEventListener("loadflow_state_change", handleStateChange);
-    return () => window.removeEventListener("loadflow_state_change", handleStateChange);
+
+    fetchCarrierData();
+
+    channel = supabase
+      .channel("carrier_realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "loads" }, () => {
+        fetchCarrierData();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "carrier_compliance" }, () => {
+        fetchCarrierData();
+      })
+      .subscribe();
+
+    return () => {
+      if (channel) supabase.removeChannel(channel);
+    };
   }, []);
 
-  // Filter loads assigned to this carrier
-  const myLoads = loads.filter(l => l.carrierName === CARRIER_NAME);
+  // Filter loads assigned to this carrier (already filtered on fetch, but keep variable name)
+  const myLoads = loads;
   
   // Metrics
   const activeRuns = myLoads.filter(l => ["booked", "in_transit", "delivered"].includes(l.status));
@@ -67,41 +109,42 @@ export default function CarrierOverview() {
     .reduce((acc, curr) => acc + curr.rate, 0);
 
   // Status transitions
-  const handleTransitionStatus = (loadId: string, currentStatus: string) => {
+  const handleTransitionStatus = async (loadId: string, currentStatus: string) => {
+    const load = loads.find(l => l.id === loadId);
+    if (!load || !(load as any).db_id) return;
+
     let nextStatus: Load["status"] = "booked";
     if (currentStatus === "booked") nextStatus = "in_transit";
     else if (currentStatus === "in_transit") nextStatus = "delivered";
     else if (currentStatus === "delivered") nextStatus = "completed";
 
-    const updated = loads.map(l => {
-      if (l.id === loadId) {
-        return { ...l, status: nextStatus };
-      }
-      return l;
-    });
+    const { error } = await supabase
+      .from("loads")
+      .update({ status: nextStatus })
+      .eq("id", (load as any).db_id);
 
-    setLoads(updated);
-    saveStoredLoads(updated);
+    if (error) {
+      console.error("Error updating status:", error);
+    }
   };
 
-  const handleSignContract = (e: React.FormEvent) => {
+  const handleSignContract = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!signingLoad) return;
+    if (!signingLoad || !(signingLoad as any).db_id) return;
 
-    const updated = loads.map(l => {
-      if (l.id === signingLoad.id) {
-        return {
-          ...l,
-          carrierSignature: signatureName,
-          signedAt: new Date().toISOString()
-        };
-      }
-      return l;
-    });
+    const { error } = await supabase
+      .from("loads")
+      .update({
+        carrier_signature: signatureName,
+        signed_at: new Date().toISOString()
+      })
+      .eq("id", (signingLoad as any).db_id);
 
-    setLoads(updated);
-    saveStoredLoads(updated);
-    setSigningLoad(null);
+    if (error) {
+      console.error("Error signing rate confirmation:", error);
+    } else {
+      setSigningLoad(null);
+    }
   };
 
   const getStatusButton = (load: Load) => {
@@ -376,7 +419,7 @@ export default function CarrierOverview() {
                 required
               />
               <Label htmlFor="agree-checkbox" className="text-slate-400 select-none cursor-pointer leading-normal">
-                I certify that I am authorized to bind {CARRIER_NAME} to this rate confirmation and agree to all terms of this digital contract.
+                I certify that I am authorized to bind {compliance?.companyName || "the carrier"} to this rate confirmation and agree to all terms of this digital contract.
               </Label>
             </div>
 

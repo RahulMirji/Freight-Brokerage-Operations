@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import DashboardShell from "@/components/DashboardShell";
-import { getStoredLoads, saveStoredLoads, getStoredCompliance } from "@/lib/stateStore";
+import { supabase, mapDbLoadToUiLoad, mapDbComplianceToUiCompliance } from "@/lib/supabase";
 import { Load, Bid, CarrierCompliance } from "@/lib/mockData";
 import { 
   Search, 
@@ -28,27 +28,68 @@ export default function CarrierBoard() {
   const [search, setSearch] = useState("");
   const [selectedLoad, setSelectedLoad] = useState<Load | null>(null);
   const [bidAmount, setBidAmount] = useState("");
-
-  const CARRIER_NAME = "Apex Trucking Inc.";
-  const CARRIER_MC = "MC-342981";
+  const [carrierId, setCarrierId] = useState<string | null>(null);
 
   useEffect(() => {
-    setLoads(getStoredLoads());
-    const list = getStoredCompliance();
-    setCompliance(list.find(c => c.companyName === CARRIER_NAME) || null);
+    const fetchCarrierBoardData = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      setCarrierId(user.id);
 
-    const handleStateChange = () => {
-      setLoads(getStoredLoads());
-      const updatedList = getStoredCompliance();
-      setCompliance(updatedList.find(c => c.companyName === CARRIER_NAME) || null);
+      // 1. Fetch compliance
+      const { data: compData } = await supabase
+        .from("carrier_compliance")
+        .select(`
+          *,
+          carrier:profiles(company_name, full_name)
+        `)
+        .eq("carrier_id", user.id)
+        .maybeSingle();
+
+      if (compData) {
+        setCompliance(mapDbComplianceToUiCompliance(compData));
+      }
+
+      // 2. Fetch available loads
+      const { data: loadsData } = await supabase
+        .from("loads")
+        .select(`
+          *,
+          shipper:profiles!loads_shipper_id_fkey(company_name),
+          carrier:profiles!loads_carrier_id_fkey(company_name),
+          bids:bids(
+            *,
+            carrier:profiles!bids_carrier_id_fkey(full_name, company_name)
+          )
+        `)
+        .eq("status", "posted")
+        .order("created_at", { ascending: false });
+
+      if (loadsData) {
+        setLoads(loadsData.map(mapDbLoadToUiLoad));
+      }
     };
-    window.addEventListener("loadflow_state_change", handleStateChange);
-    return () => window.removeEventListener("loadflow_state_change", handleStateChange);
+
+    fetchCarrierBoardData();
+
+    const channel = supabase
+      .channel("carrier_board_realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "loads" }, () => {
+        fetchCarrierBoardData();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "bids" }, () => {
+        fetchCarrierBoardData();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
-  const handlePlaceBid = (e: React.FormEvent) => {
+  const handlePlaceBid = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedLoad) return;
+    if (!selectedLoad || !carrierId) return;
     if (compliance?.insuranceStatus !== "compliant") {
       alert("Compliance Block: You must be in fully compliant standing to submit bids.");
       return;
@@ -57,33 +98,24 @@ export default function CarrierBoard() {
     const bidVal = Number(bidAmount);
     if (isNaN(bidVal) || bidVal <= 0) return;
 
-    const newBid: Bid = {
-      id: `B-${Math.floor(100 + Math.random() * 900)}`,
-      carrierName: CARRIER_NAME,
-      carrierMc: CARRIER_MC,
-      amount: bidVal,
-      rating: 4.8,
-      status: "pending",
-      submittedAt: new Date().toISOString()
-    };
+    const { error: insertError } = await supabase
+      .from("bids")
+      .insert({
+        load_id: (selectedLoad as any).db_id,
+        carrier_id: carrierId,
+        amount: bidVal,
+        status: "pending"
+      });
 
-    const updated = loads.map(load => {
-      if (load.id === selectedLoad.id) {
-        return {
-          ...load,
-          bids: [newBid, ...load.bids]
-        };
+    if (insertError) {
+      if (insertError.code === "23505") {
+        alert("You have already submitted a bid on this load.");
+      } else {
+        alert(insertError.message || "Failed to submit bid. Please try again.");
       }
-      return load;
-    });
-
-    setLoads(updated);
-    saveStoredLoads(updated);
-    setBidAmount("");
-    
-    // Update local state for selection panel
-    const currentLoad = updated.find(l => l.id === selectedLoad.id) || null;
-    setSelectedLoad(currentLoad);
+    } else {
+      setBidAmount("");
+    }
   };
 
   // Only display loads with status 'posted'
@@ -94,6 +126,8 @@ export default function CarrierBoard() {
     const searchString = `${load.id} ${load.originCity} ${load.destinationCity} ${load.equipmentType}`.toLowerCase();
     return searchString.includes(search.toLowerCase());
   });
+
+  const activeSelectedLoad = selectedLoad ? loads.find(l => l.id === selectedLoad.id) || selectedLoad : null;
 
   return (
     <DashboardShell activeRole="carrier">
@@ -134,8 +168,8 @@ export default function CarrierBoard() {
 
           {filteredLoads.length > 0 ? (
             filteredLoads.map((load) => {
-              const hasBid = load.bids.some(b => b.carrierName === CARRIER_NAME);
-              const isActive = selectedLoad?.id === load.id;
+              const hasBid = carrierId ? load.bids.some(b => b.carrier_id === carrierId) : false;
+              const isActive = activeSelectedLoad?.id === load.id;
 
               return (
                 <div 
@@ -210,12 +244,12 @@ export default function CarrierBoard() {
 
         {/* Load bidding details panel */}
         <div className="space-y-6">
-          {selectedLoad ? (
+          {activeSelectedLoad ? (
             <Card className="bg-slate-900/50 border-slate-800 backdrop-blur-sm sticky top-6">
               
               <CardHeader className="border-b border-slate-800/80 pb-4">
                 <div className="flex items-center gap-2">
-                  <CardTitle className="text-lg font-bold text-white">{selectedLoad.id}</CardTitle>
+                  <CardTitle className="text-lg font-bold text-white">{activeSelectedLoad.id}</CardTitle>
                   <Badge variant="outline" className="text-[9px] px-1.5 py-0">SPOT FREIGHT</Badge>
                 </div>
                 <CardDescription className="text-xs text-slate-400 mt-1">Shipped via LoadFlow Certified Broker</CardDescription>
@@ -227,13 +261,13 @@ export default function CarrierBoard() {
                 <div className="p-3 bg-slate-950/40 border border-slate-850 rounded-xl space-y-2 text-xs">
                   <p className="text-slate-500 font-bold uppercase text-[9px] tracking-wider">Route Details</p>
                   <div className="flex justify-between items-center text-slate-200">
-                    <span className="font-semibold">{selectedLoad.originCity}, {selectedLoad.originState}</span>
+                    <span className="font-semibold">{activeSelectedLoad.originCity}, {activeSelectedLoad.originState}</span>
                     <span className="text-slate-600 font-normal">➔</span>
-                    <span className="font-semibold">{selectedLoad.destinationCity}, {selectedLoad.destinationState}</span>
+                    <span className="font-semibold">{activeSelectedLoad.destinationCity}, {activeSelectedLoad.destinationState}</span>
                   </div>
                   <div className="flex justify-between text-slate-400 mt-1 pt-1.5 border-t border-slate-900">
-                    <span>Pickup: {selectedLoad.pickupDate}</span>
-                    <span>Delivery: {selectedLoad.deliveryDate}</span>
+                    <span>Pickup: {activeSelectedLoad.pickupDate}</span>
+                    <span>Delivery: {activeSelectedLoad.deliveryDate}</span>
                   </div>
                 </div>
 
@@ -242,13 +276,13 @@ export default function CarrierBoard() {
                   <p className="text-slate-500 font-bold uppercase text-[9px] tracking-wider">Trailer / Load Specifications</p>
                   <div className="grid grid-cols-2 gap-y-2 text-xs">
                     <div className="text-slate-400">Trailer Required:</div>
-                    <div className="text-slate-200 font-semibold text-right">{selectedLoad.equipmentType}</div>
+                    <div className="text-slate-200 font-semibold text-right">{activeSelectedLoad.equipmentType}</div>
                     <div className="text-slate-400">Cargo Weight:</div>
-                    <div className="text-slate-200 font-semibold text-right">{selectedLoad.weightLbs.toLocaleString()} lbs</div>
+                    <div className="text-slate-200 font-semibold text-right">{activeSelectedLoad.weightLbs.toLocaleString()} lbs</div>
                   </div>
-                  {selectedLoad.description && (
+                  {activeSelectedLoad.description && (
                     <p className="text-xs text-slate-400 italic bg-slate-950/20 p-2.5 rounded-lg border border-slate-900 mt-2">
-                      "{selectedLoad.description}"
+                      "{activeSelectedLoad.description}"
                     </p>
                   )}
                 </div>
@@ -257,16 +291,16 @@ export default function CarrierBoard() {
                 <div className="border-t border-slate-800/40 pt-4 space-y-4">
                   <div className="flex items-center justify-between">
                     <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Submit Rates</h4>
-                    <span className="text-[11px] text-slate-400 font-medium">Broker rate: <strong>${selectedLoad.rate}</strong></span>
+                    <span className="text-[11px] text-slate-400 font-medium">Broker rate: <strong>${activeSelectedLoad.rate}</strong></span>
                   </div>
 
-                  {selectedLoad.bids.some(b => b.carrierName === CARRIER_NAME) ? (
+                  {carrierId && activeSelectedLoad.bids.some(b => b.carrier_id === carrierId) ? (
                     <div className="p-4 bg-emerald-950/15 border border-emerald-500/10 rounded-xl text-center space-y-2.5">
                       <FileCheck2 size={24} className="mx-auto text-emerald-400" />
                       <div>
                         <p className="text-sm font-bold text-slate-200">Bid Submitted Successfully</p>
                         <p className="text-xs text-slate-400 mt-0.5">
-                          Amount: <strong className="text-emerald-400">${selectedLoad.bids.find(b => b.carrierName === CARRIER_NAME)?.amount}</strong>
+                          Amount: <strong className="text-emerald-400">${activeSelectedLoad.bids.find(b => b.carrier_id === carrierId)?.amount}</strong>
                         </p>
                       </div>
                       <p className="text-[10px] text-slate-500">Wait for the broker to review and accept/decline your offer.</p>
@@ -278,15 +312,15 @@ export default function CarrierBoard() {
                         <div className="relative">
                           <DollarSign className="absolute left-3 top-2.5 h-4.5 w-4.5 text-slate-500" />
                           <Input 
-                            id="bid-rate" 
-                            type="number"
-                            placeholder="e.g. 2350"
-                            value={bidAmount}
-                            onChange={(e) => setBidAmount(e.target.value)}
-                            disabled={compliance?.insuranceStatus !== "compliant"}
-                            className="pl-9 bg-slate-950 border-slate-800 focus-visible:ring-cyan-500/20 text-sm font-semibold"
-                            required
-                          />
+                             id="bid-rate" 
+                             type="number"
+                             placeholder="e.g. 2350"
+                             value={bidAmount}
+                             onChange={(e) => setBidAmount(e.target.value)}
+                             disabled={compliance?.insuranceStatus !== "compliant"}
+                             className="pl-9 bg-slate-950 border-slate-800 focus-visible:ring-cyan-500/20 text-sm font-semibold"
+                             required
+                           />
                         </div>
                       </div>
                       <Button 
